@@ -4,7 +4,8 @@
 """
 Independent reference implementation of the OSEF v1 on-disk format, used to
 generate the known-answer vectors in HkdfKeyDerivationKnownAnswerTests,
-FrameIvKnownAnswerTests and EncryptionFooterKnownAnswerTests, and the
+FrameIvKnownAnswerTests, ChunkCipherKnownAnswerTests and
+EncryptionFooterKnownAnswerTests, and the
 committed golden file golden-v1.osef.
 
 It deliberately shares no code with the plugin: HKDF is written out from
@@ -63,6 +64,24 @@ def frame_iv(base_iv, offset_within_frame):
     return base_iv[:12] + struct.pack(">I", (offset_within_frame >> 4) + 2)
 
 
+CHUNK_SIZE = 1 << 13  # ChunkCipher.CHUNK_SIZE
+
+
+def chunk_nonce(chunk_index):
+    # ChunkCipher: four zero bytes || big-endian 64-bit chunk index.
+    return b"\x00" * 4 + struct.pack(">Q", chunk_index)
+
+
+def seal_chunks(key, plaintext):
+    """Seals plaintext chunk by chunk; returns (ciphertext, [tags])."""
+    ciphertext, tags = b"", []
+    for i in range(0, len(plaintext), CHUNK_SIZE):
+        sealed = AESGCM(key).encrypt(chunk_nonce(i // CHUNK_SIZE), plaintext[i : i + CHUNK_SIZE], None)
+        ciphertext += sealed[:-16]
+        tags.append(sealed[-16:])
+    return ciphertext, tags
+
+
 def golden_plaintext(length):
     return bytes((i * 31 + 7) & 0xFF for i in range(length))
 
@@ -96,6 +115,13 @@ def main():
     print("hkdf(49, ctx)      ", hkdf_sha384(MASTER_KEY, MESSAGE_ID, b"known-answer-test", 49).hex())
     print("translogIV(short)  ", translog_base_iv(MASTER_KEY, "short-uuid").hex())
     print("translogIV(long)   ", translog_base_iv(MASTER_KEY, "8rKGBKWtR9S2bIZ_hXlTQw-trailing").hex())
+
+    chunk_ct, chunk_tags = seal_chunks(fk, golden_plaintext(CHUNK_SIZE + 100))
+    print("chunkNonce(0x0102030405060708)", chunk_nonce(0x0102030405060708).hex())
+    print("chunk0 ct[0:16]    ", chunk_ct[:16].hex())
+    print("chunk0 tag         ", chunk_tags[0].hex())
+    print("chunk1 ct[0:16]    ", chunk_ct[CHUNK_SIZE : CHUNK_SIZE + 16].hex())
+    print("chunk1 tag         ", chunk_tags[1].hex())
 
     plaintext = golden_plaintext(GOLDEN_PLAINTEXT_LENGTH)
     sealed = AESGCM(fk).encrypt(iv0[:12], plaintext, None)
