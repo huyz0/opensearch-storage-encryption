@@ -155,17 +155,16 @@ public class NodeLevelKeyCacheTests extends OpenSearchTestCase {
     }
 
     public void testInitialKeyLoadFailure() throws Exception {
-        when(mockResolver.loadKeyFromMasterKeyProvider())
-            .thenThrow(new RuntimeException("KMS unavailable"));
-        
+        when(mockResolver.loadKeyFromMasterKeyProvider()).thenThrow(new RuntimeException("KMS unavailable"));
+
         Settings settings = Settings.EMPTY;
         MasterKeyHealthMonitor.initialize(settings, mockClient, mockClusterService);
         NodeLevelKeyCache.initialize(settings, MasterKeyHealthMonitor.getInstance());
         NodeLevelKeyCache cache = NodeLevelKeyCache.getInstance();
-        
+
         // Register the mock resolver
         registerMockResolver(TEST_INDEX_UUID, TEST_SHARD_ID);
-        
+
         Exception thrown = null;
         try {
             cache.get(TEST_INDEX_UUID, TEST_SHARD_ID, "test-index");
@@ -173,7 +172,7 @@ public class NodeLevelKeyCacheTests extends OpenSearchTestCase {
         } catch (Exception e) {
             thrown = e;
         }
-        
+
         assertNotNull(thrown);
         // Exception is now wrapped in KeyCacheException with suppressed cause
         assertTrue(thrown instanceof KeyCacheException);
