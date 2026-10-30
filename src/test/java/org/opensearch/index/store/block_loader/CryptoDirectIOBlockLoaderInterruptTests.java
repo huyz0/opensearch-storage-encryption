@@ -156,6 +156,35 @@ public class CryptoDirectIOBlockLoaderInterruptTests extends OpenSearchTestCase 
     }
 
     /**
+     * A thread that is already interrupted when it starts a load must fail without touching the shared
+     * channel, so it cannot keep closing the channel that healthy readers are using.
+     */
+    public void testAlreadyInterruptedLoadLeavesSharedChannelOpen() throws Exception {
+        CryptoDirectIOBlockLoader loader = newLoader(poolResources.getFileChannelCache());
+        assertLoadsBlock(loader, 0); // caches the shared channel
+        String normalized = dirPath.resolve(FILE_NAME).toAbsolutePath().normalize().toString();
+        java.nio.channels.FileChannel shared;
+        try (RefCountedChannel ref = poolResources.getFileChannelCache().acquire(normalized)) {
+            shared = ref.channel();
+        }
+
+        for (int i = 0; i < 3; i++) {
+            Thread.currentThread().interrupt();
+            try {
+                expectThrows(ClosedByInterruptException.class, () -> loader.load(dirPath.resolve(FILE_NAME), CACHE_BLOCK_SIZE, 1));
+            } finally {
+                assertTrue("interrupt flag should be preserved", Thread.interrupted());
+            }
+        }
+
+        assertTrue("an interrupted load must not close the shared channel", shared.isOpen());
+        try (RefCountedChannel ref = poolResources.getFileChannelCache().acquire(normalized)) {
+            assertSame(shared, ref.channel());
+        }
+        assertLoadsBlock(loader, CACHE_BLOCK_SIZE);
+    }
+
+    /**
      * Another thread's interrupt can close the shared channel after this reader acquired it. This
      * reader was not interrupted, so it must retry on a fresh channel instead of failing, even if it
      * happens more than once.

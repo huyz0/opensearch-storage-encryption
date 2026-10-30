@@ -180,6 +180,11 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
      */
     private MemorySegment readAligned(String normalizedPath, Path filePath, long startOffset, long readLength, Arena arena)
         throws IOException {
+        if (Thread.currentThread().isInterrupted()) {
+            // An already-cancelled thread would close the shared channel on its first read, and keep
+            // closing each replacement on every later load. Fail before touching it.
+            throw new ClosedByInterruptException();
+        }
         for (int attempt = 1;; attempt++) {
             // acquire() drops a closed channel from the cache and opens a new one
             try (RefCountedChannel ref = fileChannelCache.acquire(normalizedPath)) {
