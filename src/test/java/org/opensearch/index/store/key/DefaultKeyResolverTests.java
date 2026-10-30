@@ -10,9 +10,12 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Key;
 import java.security.Provider;
@@ -21,6 +24,8 @@ import java.util.concurrent.ConcurrentMap;
 
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSLockFactory;
+import org.apache.lucene.store.IOContext;
+import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.store.NIOFSDirectory;
 import org.junit.After;
 import org.junit.Before;
@@ -363,5 +368,58 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
         } catch (KeyCacheException e) {
             assertTrue(e.getMessage().contains("Error encountered for index"));
         }
+    }
+
+    public void testKeyFileWriteLeavesNoTempFiles() throws Exception {
+        byte[] encryptedKey = new byte[32];
+        when(mockKeyProvider.generateDataPair()).thenReturn(new DataKeyPair(new byte[32], encryptedKey));
+        when(mockKeyProvider.decryptKey(any())).thenReturn(new byte[32]);
+
+        new DefaultKeyResolver(TEST_INDEX_UUID, "test-index", directory, provider, mockKeyProvider, TEST_SHARD_ID);
+
+        assertArrayEquals(new String[] { "keyfile" }, directory.listAll());
+        assertEquals(Integer.BYTES + encryptedKey.length, directory.fileLength("keyfile"));
+    }
+
+    public void testRefusesToGenerateKeyWhenSegmentsExist() throws Exception {
+        Path shardIndex = tempDir.resolve("0").resolve("index");
+        Files.createDirectories(shardIndex);
+        Files.write(shardIndex.resolve("segments_1"), new byte[] { 1 });
+
+        KeyCacheException e = expectThrows(
+            KeyCacheException.class,
+            () -> new DefaultKeyResolver(TEST_INDEX_UUID, "test-index", directory, provider, mockKeyProvider, TEST_SHARD_ID)
+        );
+        assertTrue(e.getMessage(), e.getMessage().contains("refusing to generate a new key"));
+        verify(mockKeyProvider, never()).generateDataPair();
+        assertFalse(Files.exists(tempDir.resolve("keyfile")));
+    }
+
+    public void testGeneratesKeyWhenShardDirectoriesAreEmpty() throws Exception {
+        // A brand-new shard has its directories created before the key resolver runs
+        Files.createDirectories(tempDir.resolve("0").resolve("index"));
+        Files.createDirectories(tempDir.resolve("0").resolve("translog"));
+        Files.write(tempDir.resolve("0").resolve("translog").resolve("translog.ckp"), new byte[] { 1 });
+        Files.write(tempDir.resolve("0").resolve("translog").resolve("translog-1.tlog"), new byte[] { 1 });
+        when(mockKeyProvider.generateDataPair()).thenReturn(new DataKeyPair(new byte[32], new byte[32]));
+        when(mockKeyProvider.decryptKey(any())).thenReturn(new byte[32]);
+
+        new DefaultKeyResolver(TEST_INDEX_UUID, "test-index", directory, provider, mockKeyProvider, TEST_SHARD_ID);
+
+        assertTrue(Files.exists(tempDir.resolve("keyfile")));
+    }
+
+    public void testTruncatedKeyFileIsRejected() throws Exception {
+        try (IndexOutput out = directory.createOutput("keyfile", IOContext.DEFAULT)) {
+            out.writeInt(32);
+            out.writeBytes(new byte[10], 0, 10);
+        }
+
+        expectThrows(
+            KeyCacheException.class,
+            () -> new DefaultKeyResolver(TEST_INDEX_UUID, "test-index", directory, provider, mockKeyProvider, TEST_SHARD_ID)
+        );
+        verify(mockKeyProvider, never()).decryptKey(any());
+        verify(mockKeyProvider, never()).generateDataPair();
     }
 }
