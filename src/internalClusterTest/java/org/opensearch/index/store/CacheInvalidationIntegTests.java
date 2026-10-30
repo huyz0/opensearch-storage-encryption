@@ -593,9 +593,9 @@ public class CacheInvalidationIntegTests extends OpenSearchIntegTestCase {
      * Clears the block cache and reopens the indices, so that the next reads miss every cache level
      * and go through the block loader, which populates the FD cache.
      *
-     * Clearing the shared block cache alone is not enough: each open IndexInput keeps its recent blocks
-     * pinned in its own {@code BlockSlotTinyCache}, so with small segments the searches never miss and
-     * the FD cache stays empty. Reopening replaces those inputs.
+     * Clearing the shared block cache alone is not enough: each open IndexInput keeps its current block
+     * pinned ({@code CachedMemorySegmentIndexInput#currentBlock}) and reads it without a cache lookup, so
+     * with small segments the searches never miss and the FD cache stays empty. Reopening replaces those inputs.
      */
     private void reopenWithColdCaches(String... indices) {
         clearBlockCache();
