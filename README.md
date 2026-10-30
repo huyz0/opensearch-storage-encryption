@@ -83,7 +83,7 @@ A node-wide cache built on Caffeine holds decrypted 8 KB blocks for `BufferPoolD
 #### Encryption Engine
 Index files are written with AES-256-GCM by `OpenSslNativeCipher` (OpenSSL through Panama) in 32 GiB frames. The per-frame GCM tags and an authenticated footer are appended to the file. Reads decrypt the same keystream with AES-CTR (`AesCipherFactory`) so they can start at any offset; the per-frame tags are not checked on read (see [Limitations and known issues](#limitations-and-known-issues)). `AesGcmCipherFactory` holds the GCM helpers used by the footer.
 
-Translog files keep core's header in plaintext, followed by a 4-byte magic, a random 16-byte nonce per file, and the operation data encrypted with offset-keyed AES-256-CTR under the index data key (`CryptoFileChannelWrapper`, `TranslogCipher`). Any byte range can be decrypted on its own, so reads work while a generation is still being written and everything written before a crash stays readable.
+Translog files keep core's header in plaintext, followed by a 4-byte magic, a random 16-byte nonce per file, and the operation data encrypted with offset-keyed AES-256-CTR under the index data key (`CryptoFileChannelWrapper`, `TranslogCipher`). Any byte range can be decrypted on its own, so reads work while a generation is still being written and everything written before a crash stays readable. Each node has its own data key, so translog files are uploaded to the remote store decrypted; a downloaded file is encrypted under the local key the first time it is opened.
 
 #### Memory Management
 Efficient memory management is achieved through `MemorySegmentPool`, which provides pooling of off-heap memory segments. `RefCountedMemorySegment` ensures safe concurrent access through reference counting. The system supports configurable pool sizes and warmup strategies to optimize resource utilization.
@@ -368,7 +368,6 @@ The plugin has no release yet and is not ready for production use. The items bel
 - **Footer not bound to its file.** The footer does not include the index, shard or file name, so swapping or rolling back whole files is not detected.
 
 ### Durability and availability
-- Remote-store translog failover, promotion and restore do not work with encrypted indices: the remote translog is uploaded decrypted but read back through the decrypting channel. Segment-replication replicas work.
 - KMS encryption context is recomputed from repository settings each time a shard opens. Changing repositories can make an index unopenable.
 - A revoked or unavailable master key is not enforced immediately: cached data keys keep working for up to `node.store.crypto.key_expiry_interval` (default 24 hours).
 
@@ -380,7 +379,7 @@ Still open:
 - **Block pool exhaustion.** A cache miss can wait up to 5 seconds for a free block while holding a cache lock, which can stall searches node-wide under memory pressure.
 - **Interrupted threads close shared file channels.** An interrupt during a block read closes the node-wide cached `FileChannel`, and later loads of that file fail until it is evicted.
 
-Fixed on `main`: translog nonce reuse (every chunk of every generation used the same AES-GCM nonce) and the translog tail tag that was written only on close, the L2 block cache lookup/recycle race that could return another block's plaintext, encrypted translog reads returning 0 instead of -1 at end of data, wrong plaintext for buffer-pool reads that cross a 32 GiB frame boundary, missing EOF and slice-bounds checks in `CachedMemorySegmentIndexInput` (reads past a compound-file slice returned neighbouring bytes), NIOFS input clones closing the shared file channel, the shared read-ahead worker being stopped when any one directory closed, and keyfiles written without fsync or atomic rename.
+Fixed on `main`: translog nonce reuse (every chunk of every generation used the same AES-GCM nonce) and the translog tail tag that was written only on close, remote-store translog files that were uploaded decrypted but read back through the decrypting channel after download (which broke remote-store translog failover, promotion and restore), the L2 block cache lookup/recycle race that could return another block's plaintext, encrypted translog reads returning 0 instead of -1 at end of data, wrong plaintext for buffer-pool reads that cross a 32 GiB frame boundary, missing EOF and slice-bounds checks in `CachedMemorySegmentIndexInput` (reads past a compound-file slice returned neighbouring bytes), NIOFS input clones closing the shared file channel, the shared read-ahead worker being stopped when any one directory closed, and keyfiles written without fsync or atomic rename.
 
 ### What is not encrypted
 - `segments_N`, `pending_segments_N` and `.si` files, kept plaintext on purpose because core's `Store` opens them with a plain `NIOFSDirectory`; also `write.lock`
