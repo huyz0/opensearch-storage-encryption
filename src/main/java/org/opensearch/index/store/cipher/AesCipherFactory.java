@@ -13,8 +13,6 @@ import javax.crypto.Cipher;
 import javax.crypto.NoSuchPaddingException;
 
 import org.opensearch.index.store.CryptoDirectoryFactory;
-import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
-import org.opensearch.index.store.key.HkdfKeyDerivation;
 
 /**
  * Factory utility for creating and initializing Cipher instances
@@ -135,56 +133,5 @@ public class AesCipherFactory {
         ivCopy[AesCipherFactory.IV_ARRAY_LENGTH - 4] = (byte) (blockOffset >>> 24);
 
         return ivCopy;
-    }
-
-    /**
-     * Compute frame-specific IV for large file encryption
-     *
-     * @param directoryKey      the directory's master key (32 bytes)
-     * @param messageId         the file's unique MessageId (16 bytes)
-     * @param frameNumber       the frame number (0-based)
-     * @param offsetWithinFrame the byte offset within the frame
-     * @param normalizedFilePath the normalized file path string
-     * @param encryptionMetadataCache the encryption metadata cache
-     * @return frame-specific IV for encryption/decryption
-     */
-    public static byte[] computeFrameIV(
-        byte[] directoryKey,
-        byte[] messageId,
-        long frameNumber,
-        long offsetWithinFrame,
-        String normalizedFilePath,
-        EncryptionMetadataCache encryptionMetadataCache
-    ) {
-        if (messageId.length != 16) {
-            throw new IllegalArgumentException("MessageId must be 16 bytes");
-        }
-        if (frameNumber < 0 || frameNumber >= EncryptionMetadataTrailer.MAX_FRAMES_PER_FILE) {
-            throw new IllegalArgumentException("Invalid frame number: " + frameNumber);
-        }
-
-        // Get or derive frame base IV from cache
-        byte[] frameBaseIV = encryptionMetadataCache.getFrameIv(normalizedFilePath, frameNumber);
-        if (frameBaseIV == null) {
-            String frameContext = EncryptionMetadataTrailer.FRAME_CONTEXT_PREFIX + frameNumber;
-            frameBaseIV = HkdfKeyDerivation.deriveKey(directoryKey, messageId, frameContext, 16);
-            encryptionMetadataCache.putFrameIv(normalizedFilePath, frameNumber, frameBaseIV);
-        }
-
-        // Modify last 4 bytes for block counter within frame
-        byte[] frameIV = new byte[16];
-        System.arraycopy(frameBaseIV, 0, frameIV, 0, 16);
-        int blockOffset = (int) (offsetWithinFrame >> AES_BLOCK_SIZE_BYTES_IN_POWER);
-
-        // Add 2 for GCM compatibility: counter 0 (reserved) + counter 1 (auth) + data counters start at 2
-        blockOffset += 2;
-
-        // Bytes 12-15: Block counter within frame (4 bytes, big-endian)
-        frameIV[12] = (byte) (blockOffset >>> 24);
-        frameIV[13] = (byte) (blockOffset >>> 16);
-        frameIV[14] = (byte) (blockOffset >>> 8);
-        frameIV[15] = (byte) blockOffset;
-
-        return frameIV;
     }
 }

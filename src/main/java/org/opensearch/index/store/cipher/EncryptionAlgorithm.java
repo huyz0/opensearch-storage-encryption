@@ -4,10 +4,6 @@
  */
 package org.opensearch.index.store.cipher;
 
-import java.security.Provider;
-
-import javax.crypto.Cipher;
-
 /**
  * Enumeration of supported encryption algorithms
  *
@@ -31,30 +27,6 @@ public enum EncryptionAlgorithm {
 
     public String getAlgorithmName() {
         return algorithmName;
-    }
-
-    /**
-     * Get encryption cipher for this algorithm
-     */
-    public Cipher getEncryptionCipher(Provider provider) {
-        switch (this) {
-            case AES_256_GCM_CTR:
-                return AesGcmCipherFactory.getCipher(provider);
-            default:
-                throw new IllegalArgumentException("Unsupported algorithm: " + this);
-        }
-    }
-
-    /**
-     * Get decryption cipher for this algorithm
-     */
-    public Cipher getDecryptionCipher() {
-        switch (this) {
-            case AES_256_GCM_CTR:
-                return AesCipherFactory.CIPHER_POOL.get(); // CTR for reading
-            default:
-                throw new IllegalArgumentException("Unsupported algorithm: " + this);
-        }
     }
 
     /**

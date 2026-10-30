@@ -37,40 +37,14 @@ public class EncryptionMetadataTrailer {
     public static final int ALGORITHM_ID_SIZE = 2;
     public static final int FOOTER_LENGTH_SIZE = 4;
     public static final int FOOTER_AUTH_TAG_SIZE = 16;
-    public static final int GCM_TAG_SIZE = 16;
 
     // Calculated sizes
     public static final int FIXED_FOOTER_SIZE = MESSAGE_ID_SIZE + KEY_METADATA_LENGTH_SIZE + ALGORITHM_ID_SIZE + FOOTER_LENGTH_SIZE
         + MAGIC.length;
     public static final int MIN_FOOTER_SIZE = FIXED_FOOTER_SIZE + DATA_LENGTH_SIZE + CHUNK_SIZE_SIZE + FOOTER_AUTH_TAG_SIZE;
 
-    // Frame constants for large file support
-    public static final int DEFAULT_FRAME_SIZE_POWER = 35; // 2^35 = 32GB per frame
-    public static final long DEFAULT_FRAME_SIZE = 1L << DEFAULT_FRAME_SIZE_POWER;
-    public static final int MAX_FRAMES_PER_FILE = Integer.MAX_VALUE;
-    public static final String FRAME_CONTEXT_PREFIX = "frame-";
-
     // Algorithm IDs for future extensibility
     public static final int ALGORITHM_AES_256_GCM = 1;
-
-    // Special IV for footer authentication (won't collide with frame IVs)
-    public static final byte[] FOOTER_AUTH_IV = new byte[] {
-        (byte) 0xFF,
-        (byte) 0xFF,
-        (byte) 0xFF,
-        (byte) 0xFF,
-        (byte) 0xFF,
-        (byte) 0xFF,
-        (byte) 0xFF,
-        (byte) 0xFF,
-        (byte) 0xFF,
-        (byte) 0xFF,
-        (byte) 0xFF,
-        (byte) 0xFF,
-        (byte) 0xFF,
-        (byte) 0xFF,
-        (byte) 0xFF,
-        (byte) 0xFF };
 
     /**
      * Calculate total footer size including variable parts. The chunk tag table sits before the
