@@ -13,15 +13,21 @@ import java.nio.channels.FileLock;
 import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.security.SecureRandom;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.zip.CRC32;
 
 import org.apache.lucene.codecs.CodecUtil;
+import org.apache.lucene.util.IOUtils;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.key.KeyResolver;
 
@@ -314,6 +320,131 @@ public class CryptoFileChannelWrapper extends FileChannel {
         } finally {
             positionLock.writeLock().unlock();
         }
+    }
+
+    /** Per-file locks so two opens of one file cannot race on its temporary file. */
+    private static final ConcurrentHashMap<Path, Object> CONVERSION_LOCKS = new ConcurrentHashMap<>();
+
+    /**
+     * Encrypts a translog file in place if its data is plaintext, and returns whether it did.
+     *
+     * <p>Remote-store translog files are uploaded decrypted, because each node has its own data
+     * key, and core downloads them byte for byte into the translog directory. Such a file has the
+     * core header followed directly by plaintext operations instead of the magic and nonce. It is
+     * rewritten in this format under this node's key to a temporary file, synced, and atomically
+     * moved over the original, so a crash leaves either the plaintext or the encrypted file.
+     *
+     * <p>A file counts as plaintext only if its data starts with a complete translog operation
+     * whose CRC32 checks out. Anything else, such as a damaged prefix, is left alone so that
+     * reading it fails with a clear error instead of being encrypted a second time.
+     *
+     * @param path the translog ({@code .tlog}) file
+     * @param keyResolver the key resolver for this node's data key
+     * @param translogUUID the translog UUID, which sets the header size
+     * @return true if the file was plaintext and has been encrypted
+     * @throws IOException if the file cannot be read or rewritten
+     */
+    static boolean encryptIfPlaintext(Path path, KeyResolver keyResolver, String translogUUID) throws IOException {
+        int headerSize = calculateTranslogHeaderSize(translogUUID);
+        // Fast path without a lock: an encrypted or header-only file needs nothing.
+        try (FileChannel raw = FileChannel.open(path, StandardOpenOption.READ)) {
+            if (startsWithPlaintextOperation(raw, headerSize) == false) {
+                return false;
+            }
+        }
+        Path key = path.toAbsolutePath().normalize();
+        Object lock = CONVERSION_LOCKS.computeIfAbsent(key, k -> new Object());
+        try {
+            synchronized (lock) {
+                return encryptLocked(path, keyResolver, translogUUID, headerSize);
+            }
+        } finally {
+            CONVERSION_LOCKS.remove(key, lock);
+        }
+    }
+
+    private static boolean encryptLocked(Path path, KeyResolver keyResolver, String translogUUID, int headerSize) throws IOException {
+        Path tmp = path.resolveSibling(path.getFileName() + ".encrypting");
+        try (FileChannel raw = FileChannel.open(path, StandardOpenOption.READ)) {
+            // Check again: another open may have converted the file while this one waited.
+            if (startsWithPlaintextOperation(raw, headerSize) == false) {
+                return false;
+            }
+            Files.deleteIfExists(tmp);
+            Set<OpenOption> options = Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, StandardOpenOption.READ);
+            try {
+                try (
+                    CryptoFileChannelWrapper out = new CryptoFileChannelWrapper(
+                        FileChannel.open(tmp, options.toArray(new OpenOption[0])),
+                        keyResolver,
+                        path,
+                        options,
+                        translogUUID
+                    )
+                ) {
+                    ByteBuffer buf = ByteBuffer.allocate(64 * 1024);
+                    long pos = 0;
+                    int n;
+                    while ((n = raw.read(buf, pos)) >= 0) {
+                        pos += n;
+                        buf.flip();
+                        while (buf.hasRemaining()) {
+                            out.write(buf);
+                        }
+                        buf.clear();
+                    }
+                    out.force(true);
+                }
+                Files.move(tmp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException | RuntimeException e) {
+                IOUtils.deleteFilesIgnoringExceptions(tmp);
+                throw e;
+            }
+        }
+        IOUtils.fsync(path.toAbsolutePath().getParent(), true);
+        return true;
+    }
+
+    /**
+     * Returns whether the data after the header starts with a whole plaintext translog operation:
+     * a size of at least 4, followed by that many bytes whose last 4 are the CRC32 of the rest.
+     */
+    private static boolean startsWithPlaintextOperation(FileChannel raw, int headerSize) throws IOException {
+        long dataLength = raw.size() - headerSize;
+        if (dataLength < 2 * Integer.BYTES) {
+            return false;
+        }
+        int opSize = readInt(raw, headerSize);
+        if (opSize == MAGIC) {
+            return false; // already encrypted
+        }
+        if (opSize < Integer.BYTES || opSize > dataLength - Integer.BYTES) {
+            return false;
+        }
+        CRC32 crc = new CRC32();
+        ByteBuffer buf = ByteBuffer.allocate((int) Math.min(64 * 1024, opSize - Integer.BYTES));
+        long pos = headerSize + Integer.BYTES;
+        long end = pos + opSize - Integer.BYTES;
+        while (pos < end) {
+            buf.clear().limit((int) Math.min(buf.capacity(), end - pos));
+            int n = raw.read(buf, pos);
+            if (n < 0) {
+                return false;
+            }
+            crc.update(buf.flip());
+            pos += n;
+        }
+        return Integer.toUnsignedLong(readInt(raw, end)) == crc.getValue();
+    }
+
+    private static int readInt(FileChannel channel, long position) throws IOException {
+        ByteBuffer buf = ByteBuffer.allocate(Integer.BYTES);
+        while (buf.hasRemaining()) {
+            if (channel.read(buf, position + buf.position()) < 0) {
+                throw new IOException("Unexpected end of translog file at " + position);
+            }
+        }
+        return buf.getInt(0);
     }
 
     /** Returns the cipher for an existing file's data, or null if the file has no data yet. */
