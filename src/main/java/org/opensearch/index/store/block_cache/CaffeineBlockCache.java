@@ -57,6 +57,11 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
         return cache.getIfPresent(key);
     }
 
+    @Override
+    public BlockCacheValue<T> peek(BlockCacheKey key) {
+        return cache.policy().getIfPresentQuietly(key);
+    }
+
     /**
     * Retrieves the cached block associated with the given key, or loads it if not present.
     * <p>
