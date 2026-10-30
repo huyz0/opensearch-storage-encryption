@@ -44,8 +44,12 @@ import org.opensearch.common.SuppressForbidden;
  * that is already in the kernel finishes; the interrupted thread sees its interrupt flag afterwards.
  *
  * <p>Only positional and relative reads, {@link #size()} and {@link #position()} are supported.
- * {@link #open} falls back to {@link FileChannel#open} where native access is unavailable (not
- * Linux x86_64 or aarch64, or the JVM was started without native access).
+ * {@link #open} falls back to {@link FileChannel#open} on other platforms (anything but Linux x86_64
+ * or aarch64) or if linking the libc functions fails, for example when native access is denied with
+ * {@code --illegal-native-access=deny}.
+ *
+ * <p>{@code open(2)} is called directly, bypassing any file-permission checks the JVM applies to
+ * {@link FileChannel#open}. Use this class only for files the plugin already owns, such as shard files.
  */
 @SuppressForbidden(reason = "Uses Panama FFI for uninterruptible positional reads")
 public final class NativeFileChannel extends FileChannel {
@@ -92,6 +96,8 @@ public final class NativeFileChannel extends FileChannel {
                     .downcallHandle(
                         libc.find("open").orElseThrow(),
                         FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.JAVA_INT),
+                        // open(2) is variadic (the optional mode follows flags), and we pass no variadic args
+                        Linker.Option.firstVariadicArg(2),
                         ccs
                     );
                 pread = linker
@@ -206,8 +212,12 @@ public final class NativeFileChannel extends FileChannel {
         if (position < 0) {
             throw new IllegalArgumentException("Negative position");
         }
+        if (dst.isReadOnly()) {
+            throw new IllegalArgumentException("Read-only buffer");
+        }
         int len = dst.remaining();
         if (len == 0) {
+            ensureOpen();
             return 0;
         }
         closeLock.readLock().lock();

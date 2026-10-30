@@ -11,10 +11,16 @@ import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.NonWritableChannelException;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.Before;
@@ -166,6 +172,114 @@ public class NativeFileChannelTests extends OpenSearchTestCase {
             ByteBuffer buf = aligned.asByteBuffer();
             assertEquals(8192, fc.read(buf, 4096));
             assertContent(buf.flip(), 4096, 8192);
+        }
+    }
+
+    public void testAccessDenied() throws IOException {
+        Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("---------"));
+        assumeFalse("running with root privileges", Files.isReadable(file));
+        expectThrows(AccessDeniedException.class, () -> NativeFileChannel.open(file, false, null));
+    }
+
+    public void testReadOfDirectoryReportsErrno() throws IOException {
+        try (FileChannel fc = NativeFileChannel.open(file.getParent(), false, null)) {
+            IOException e = expectThrows(IOException.class, () -> fc.read(ByteBuffer.allocateDirect(8), 0));
+            assertTrue(e.getMessage(), e.getMessage().contains("errno 21")); // EISDIR
+        }
+    }
+
+    public void testReadOnlyBufferRejected() throws IOException {
+        try (FileChannel fc = open()) {
+            expectThrows(IllegalArgumentException.class, () -> fc.read(ByteBuffer.allocateDirect(16).asReadOnlyBuffer(), 0));
+            expectThrows(IllegalArgumentException.class, () -> fc.read(ByteBuffer.allocate(16).asReadOnlyBuffer(), 0));
+        }
+    }
+
+    /** close() waits for a read in flight; later reads fail with ClosedChannelException. */
+    public void testCloseWaitsForInFlightRead() throws Exception {
+        Path big = file.resolveSibling("big");
+        int size = 16 << 20;
+        Files.write(big, new byte[size]);
+        FileChannel fc = NativeFileChannel.open(big, false, null);
+        AtomicReference<Object> result = new AtomicReference<>();
+        Thread reader = new Thread(() -> {
+            try {
+                result.set(fc.read(ByteBuffer.allocateDirect(size), 0));
+            } catch (Throwable e) {
+                result.set(e);
+            }
+        });
+        reader.start();
+        fc.close();
+        reader.join();
+        Object res = result.get();
+        assertTrue(
+            "read completes fully or sees the close: " + res,
+            Integer.valueOf(size).equals(res) || res instanceof ClosedChannelException
+        );
+        expectThrows(ClosedChannelException.class, () -> fc.read(ByteBuffer.allocateDirect(8), 0));
+    }
+
+    /**
+     * Closing while readers are in flight must never let a read reach another file that reused the
+     * freed fd number.
+     */
+    public void testCloseDuringReadsNeverReadsAnotherFile() throws Exception {
+        byte[] a = new byte[1 << 20];
+        byte[] b = new byte[1 << 20];
+        Arrays.fill(a, (byte) 'A');
+        Arrays.fill(b, (byte) 'B');
+        Path fileA = Files.write(file.resolveSibling("a"), a);
+        Path fileB = Files.write(file.resolveSibling("b"), b);
+        for (int round = 0; round < 20; round++) {
+            FileChannel fc = NativeFileChannel.open(fileA, false, null);
+            int readers = 4;
+            CountDownLatch started = new CountDownLatch(readers);
+            AtomicBoolean stop = new AtomicBoolean();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            List<Thread> threads = new ArrayList<>();
+            for (int t = 0; t < readers; t++) {
+                Thread th = new Thread(() -> {
+                    ByteBuffer buf = ByteBuffer.allocateDirect(1 << 20);
+                    started.countDown();
+                    while (!stop.get()) {
+                        buf.clear();
+                        try {
+                            int n = fc.read(buf, 0);
+                            for (int i = 0; i < n; i++) {
+                                if (buf.get(i) != 'A') {
+                                    failure.compareAndSet(null, new AssertionError("read another file's byte " + (char) buf.get(i)));
+                                    return;
+                                }
+                            }
+                        } catch (ClosedChannelException e) {
+                            return;
+                        } catch (Throwable e) {
+                            failure.compareAndSet(null, e);
+                            return;
+                        }
+                    }
+                });
+                threads.add(th);
+                th.start();
+            }
+            started.await();
+            Thread.sleep(2);
+            fc.close();
+            // Grab the freed fd number while readers are still running
+            List<FileChannel> others = new ArrayList<>();
+            for (int i = 0; i < 8; i++) {
+                others.add(NativeFileChannel.open(fileB, false, null));
+            }
+            Thread.sleep(2);
+            stop.set(true);
+            for (Thread th : threads) {
+                th.join();
+            }
+            for (FileChannel o : others) {
+                o.close();
+            }
+            assertNull("round " + round, failure.get());
         }
     }
 }
