@@ -171,7 +171,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         // check cache first
         EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(normalizedPath);
         if (cachedFooter != null) {
-            return fileSize - cachedFooter.getFooterLength();
+            return cachedFooter.getDataLength();
         }
 
         // read footer from disk with OSEF validation
@@ -179,7 +179,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
             try {
                 EncryptionFooter footer = EncryptionFooter
                     .readViaFileChannel(normalizedPath, channel, keyResolver.getDataKey().getEncoded(), encryptionMetadataCache);
-                return fileSize - footer.getFooterLength();
+                return footer.getDataLength();
             } catch (EncryptionFooter.NotOSEFFileException e) {
                 return fileSize;
             }

@@ -11,55 +11,57 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
-import java.security.InvalidAlgorithmParameterException;
-import java.security.InvalidKeyException;
+import java.security.GeneralSecurityException;
 
-import javax.crypto.BadPaddingException;
-import javax.crypto.Cipher;
-import javax.crypto.IllegalBlockSizeException;
-import javax.crypto.ShortBufferException;
-import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.AEADBadTagException;
 import javax.crypto.spec.SecretKeySpec;
 
+import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.store.BufferedIndexInput;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.opensearch.common.SuppressForbidden;
-import org.opensearch.index.store.cipher.AesCipherFactory;
-import org.opensearch.index.store.cipher.EncryptionAlgorithm;
+import org.opensearch.index.store.cipher.ChunkCipher;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.key.KeyResolver;
 
 /**
- * An IndexInput implementation that decrypts data for reading
+ * An IndexInput implementation that decrypts and authenticates data for reading.
+ *
+ * <p>Reads go through whole {@link ChunkCipher} chunks: each chunk is read with its tag from the
+ * tag table and verified. The last verified chunk is kept per thread, so clones allocate nothing. A chunk that fails
+ * verification raises {@link CorruptIndexException}.
  *
  * @opensearch.internal
  */
 final class CryptoBufferedIndexInput extends BufferedIndexInput {
-    private static final byte[] ZERO_SKIP = new byte[1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER];
-    private static final ByteBuffer EMPTY_BYTEBUFFER = ByteBuffer.allocate(0);
-    private static final int CHUNK_SIZE = 16_384;
+    private static final long CHUNK_MASK = ChunkCipher.CHUNK_SIZE - 1;
 
     private final FileChannel channel;
-    private final boolean isClone;
     /** Only the input that opened the channel closes it; clones and slices share it. */
     private boolean ownsChannel;
+    /** Slice bounds, in plaintext offsets. */
     private final long off;
     private final long end;
-    private final KeyResolver keyResolver;
+    /** Plaintext length of the whole file; the tag table starts here. */
+    private final long dataLength;
     private final SecretKeySpec keySpec;
-    private final byte[] masterKey;
-    private final byte[] messageId;
-    private final int footerLength;
-    private final long frameSize;
-    private final int frameSizePower;
-    private final EncryptionAlgorithm algorithm;
-    private final EncryptionMetadataCache encryptionMetadataCache;
 
-    private ByteBuffer tmpBuffer = EMPTY_BYTEBUFFER;
+    /**
+     * Per-thread chunk buffers and the last chunk decrypted on this thread. Lucene creates many
+     * short-lived clones, so buffers are not allocated per clone. The cached chunk is keyed by the
+     * file's {@code keySpec} instance, which the opening input shares with all its clones and slices.
+     */
+    private static final class ChunkScratch {
+        final ByteBuffer ciphertext = ByteBuffer.allocate(ChunkCipher.CHUNK_SIZE);
+        final ByteBuffer tag = ByteBuffer.allocate(ChunkCipher.TAG_LENGTH);
+        final ByteBuffer plaintext = ByteBuffer.allocate(ChunkCipher.CHUNK_SIZE);
+        Object file;
+        long chunk = -1;
+    }
 
-    private final String normalizedFilePath;
+    private static final ThreadLocal<ChunkScratch> SCRATCH = ThreadLocal.withInitial(ChunkScratch::new);
 
     public CryptoBufferedIndexInput(
         String resourceDesc,
@@ -72,66 +74,40 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         throws IOException {
         super(resourceDesc, context);
         this.channel = fc;
-        this.off = 0L;
-        this.end = fc.size();
-        this.keyResolver = keyResolver;
-        this.isClone = false;
         this.ownsChannel = true;
-        this.normalizedFilePath = EncryptionMetadataCache.normalizePath(filePath);
-        this.encryptionMetadataCache = encryptionMetadataCache;
-
-        // Get master key first
-        this.masterKey = keyResolver.getDataKey().getEncoded();
+        String normalizedFilePath = EncryptionMetadataCache.normalizePath(filePath);
+        byte[] masterKey = keyResolver.getDataKey().getEncoded();
 
         // Read footer and cache metadata atomically
         EncryptionFooter footer = EncryptionFooter.readViaFileChannel(normalizedFilePath, channel, masterKey, encryptionMetadataCache);
-
-        // Get metadata (already cached by readViaFileChannel)
         var metadata = encryptionMetadataCache.getOrLoadMetadata(normalizedFilePath, footer, masterKey);
-        this.messageId = metadata.getFooter().getMessageId();
-        this.frameSize = metadata.getFooter().getFrameSize();
-        this.frameSizePower = metadata.getFooter().getFrameSizePower();
-        this.algorithm = EncryptionAlgorithm.fromId(metadata.getFooter().getAlgorithmId());
+        this.dataLength = metadata.getFooter().getDataLength();
+        // The footer may come from the cache, so check the size here too: truncation is corruption.
+        long expectedSize = dataLength + metadata.getFooter().getTrailerLength();
+        if (fc.size() != expectedSize) {
+            throw new CorruptIndexException("encrypted file size " + fc.size() + " does not match its footer (" + expectedSize + ")", this);
+        }
         this.keySpec = new SecretKeySpec(metadata.getFileKey(), ALGORITHM);
-
-        // Calculate footer length
-        this.footerLength = metadata.getFooter().getFooterLength();
+        this.off = 0L;
+        this.end = dataLength;
     }
 
-    public CryptoBufferedIndexInput(
+    private CryptoBufferedIndexInput(
         String resourceDesc,
         FileChannel fc,
         long off,
         long length,
         int bufferSize,
-        KeyResolver keyResolver,
-        SecretKeySpec keySpec,
-        int footerLength,
-        long frameSize,
-        int frameSizePower,
-        short algorithmId,
-        byte[] masterKey,
-        byte[] messageId,
-        String normalizedFilePath,
-        EncryptionMetadataCache encryptionMetadataCache
-    )
-        throws IOException {
+        long dataLength,
+        SecretKeySpec keySpec
+    ) {
         super(resourceDesc, bufferSize);
         this.channel = fc;
+        this.ownsChannel = false;
         this.off = off;
         this.end = off + length;
-        this.isClone = true;
-        this.ownsChannel = false;
-        this.keyResolver = keyResolver;
-        this.keySpec = keySpec;  // Reuse keySpec from main file
-        this.footerLength = footerLength;
-        this.frameSize = frameSize;
-        this.frameSizePower = frameSizePower;
-        this.algorithm = EncryptionAlgorithm.fromId(algorithmId);
-        this.masterKey = masterKey;  // Passed from parent
-        this.messageId = messageId;  // Passed from parent
-        this.normalizedFilePath = normalizedFilePath;
-        this.encryptionMetadataCache = encryptionMetadataCache;
+        this.dataLength = dataLength;
+        this.keySpec = keySpec;
     }
 
     @Override
@@ -145,7 +121,6 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     public CryptoBufferedIndexInput clone() {
         CryptoBufferedIndexInput clone = (CryptoBufferedIndexInput) super.clone();
         clone.ownsChannel = false;
-        clone.tmpBuffer = EMPTY_BYTEBUFFER;
         return clone;
     }
 
@@ -162,86 +137,68 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             off + offset,
             length,
             getBufferSize(),
-            keyResolver,
-            keySpec,  // Pass the already-derived keySpec
-            footerLength,
-            frameSize,
-            frameSizePower,
-            algorithm.getAlgorithmId(),
-            masterKey,  // Pass directory key
-            messageId,      // Pass message ID
-            normalizedFilePath,
-            encryptionMetadataCache
+            dataLength,
+            keySpec
         );
     }
 
     @Override
     public long length() {
-        // Exclude footer from logical file length (only for main file, not slices)
-        if (isClone) {
-            return end - off;  // Slices use exact length passed in
-        } else {
-            return end - off - footerLength;  // Main file excludes variable footer
-        }
-    }
-
-    @SuppressForbidden(reason = "FileChannel#read is efficient and used intentionally")
-    private int read(ByteBuffer dst, long position) throws IOException {
-        if (tmpBuffer == EMPTY_BYTEBUFFER) {
-            tmpBuffer = ByteBuffer.allocate(CHUNK_SIZE);
-        }
-
-        long frameNumber = position >>> frameSizePower;
-        long offsetWithinFrame = position & ((1L << frameSizePower) - 1);
-        long frameEnd = (frameNumber + 1) << frameSizePower;
-        int maxReadInFrame = (int) Math.min(dst.remaining(), frameEnd - position);
-
-        tmpBuffer.clear().limit(maxReadInFrame);
-        int bytesRead = channel.read(tmpBuffer, position);
-        if (bytesRead == -1) {
-            return -1;
-        }
-        tmpBuffer.flip();
-
-        try {
-            Cipher cipher = algorithm.getDecryptionCipher();
-            byte[] frameIV = AesCipherFactory
-                .computeFrameIV(masterKey, messageId, frameNumber, offsetWithinFrame, this.normalizedFilePath, encryptionMetadataCache);
-            cipher.init(Cipher.DECRYPT_MODE, keySpec, new IvParameterSpec(frameIV));
-
-            // skip partial AES block within frame if needed
-            int skipBytes = (int) (offsetWithinFrame & ((1 << AesCipherFactory.AES_BLOCK_SIZE_BYTES_IN_POWER) - 1));
-            if (skipBytes > 0) {
-                cipher.update(ZERO_SKIP, 0, skipBytes);
-            }
-
-            // decrypt into dst
-            return (end - position > bytesRead) ? cipher.update(tmpBuffer, dst) : cipher.doFinal(tmpBuffer, dst);
-        } catch (ShortBufferException | IllegalBlockSizeException | BadPaddingException | InvalidAlgorithmParameterException
-            | InvalidKeyException ex) {
-            throw new IOException("Failed to decrypt block at position " + position, ex);
-        }
+        return end - off;
     }
 
     @Override
     protected void readInternal(ByteBuffer b) throws IOException {
         long pos = getFilePointer() + off;
         if (pos + b.remaining() > end) {
-            throw new EOFException("read past EOF: pos=" + pos + ", end=" + end);
+            throw new EOFException("read past EOF: pos=" + pos + ", end=" + end + ": " + this);
         }
 
-        int readLength = b.remaining();
-        while (readLength > 0) {
-            final int toRead = Math.min(CHUNK_SIZE, readLength);
-            b.limit(b.position() + toRead);
-            final int bytesRead = read(b, pos);
+        ChunkScratch scratch = SCRATCH.get();
+        while (b.hasRemaining()) {
+            long chunk = pos >>> ChunkCipher.CHUNK_SIZE_POWER;
+            ByteBuffer plaintext = loadChunk(scratch, chunk);
+            int offsetInChunk = (int) (pos & CHUNK_MASK);
+            int n = Math.min(b.remaining(), plaintext.limit() - offsetInChunk);
+            b.put(b.position(), plaintext, offsetInChunk, n);
+            b.position(b.position() + n);
+            pos += n;
+        }
+    }
 
-            if (bytesRead < 0) {
-                throw new EOFException("Unexpected EOF while reading decrypted data at pos=" + pos);
+    /** Reads, verifies and decrypts {@code chunk} into the thread's scratch, unless it is already there. */
+    private ByteBuffer loadChunk(ChunkScratch scratch, long chunk) throws IOException {
+        if (scratch.file == keySpec && scratch.chunk == chunk) {
+            return scratch.plaintext;
+        }
+        scratch.file = null;
+        scratch.chunk = -1;
+
+        int length = ChunkCipher.chunkLength(chunk, dataLength);
+        readFully(scratch.ciphertext.clear().limit(length), chunk << ChunkCipher.CHUNK_SIZE_POWER);
+        readFully(scratch.tag.clear(), dataLength + chunk * ChunkCipher.TAG_LENGTH);
+
+        try {
+            ChunkCipher.open(keySpec, chunk, scratch.ciphertext.flip(), scratch.tag.flip(), scratch.plaintext.clear());
+        } catch (AEADBadTagException e) {
+            throw new CorruptIndexException("encrypted chunk " + chunk + " failed authentication", this, e);
+        } catch (GeneralSecurityException e) {
+            throw new IOException("Failed to decrypt chunk " + chunk + ": " + this, e);
+        }
+        scratch.plaintext.flip();
+        scratch.file = keySpec;
+        scratch.chunk = chunk;
+        return scratch.plaintext;
+    }
+
+    @SuppressForbidden(reason = "FileChannel#read is efficient and used intentionally")
+    private void readFully(ByteBuffer dst, long position) throws IOException {
+        while (dst.hasRemaining()) {
+            int n = channel.read(dst, position);
+            if (n < 0) {
+                throw new EOFException("Unexpected EOF at " + position + " while reading encrypted data: " + this);
             }
-
-            pos += bytesRead;
-            readLength -= bytesRead;
+            position += n;
         }
     }
 

@@ -2,11 +2,14 @@
 # Copyright OpenSearch Contributors
 # SPDX-License-Identifier: Apache-2.0
 """
-Independent reference implementation of the OSEF v1 on-disk format, used to
+Independent reference implementation of the OSEF v2 on-disk format, used to
 generate the known-answer vectors in HkdfKeyDerivationKnownAnswerTests,
 FrameIvKnownAnswerTests, ChunkCipherKnownAnswerTests and
 EncryptionFooterKnownAnswerTests, and the
-committed golden file golden-v1.osef.
+committed golden file golden-v2.osef.
+
+v2 layout: [ciphertext][one 16-byte GCM tag per 8 KiB chunk][footer]. Each chunk
+is sealed with AES-256-GCM under the file key, nonce 00000000 || chunk index.
 
 It deliberately shares no code with the plugin: HKDF is written out from
 RFC 5869 with Python's hmac module and AES-GCM comes from the `cryptography`
@@ -27,10 +30,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 MASTER_KEY = bytes(range(0x00, 0x20))  # 32 bytes
 MESSAGE_ID = bytes(range(0xA0, 0xB0))  # 16 bytes
-FRAME_SIZE = 1 << 35  # EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE
 ALGORITHM_ID = 1  # AES_256_GCM_CTR
 MAGIC = b"OSEF"
-GOLDEN_PLAINTEXT_LENGTH = 1000
+GOLDEN_PLAINTEXT_LENGTH = 20000  # two full chunks and a 3616-byte tail
 
 
 def hkdf_sha384(salt, ikm, info, length):
@@ -86,11 +88,9 @@ def golden_plaintext(length):
     return bytes((i * 31 + 7) & 0xFF for i in range(length))
 
 
-def footer_bytes(key, message_id, gcm_tags, frame_count):
-    body = b"".join(gcm_tags)
-    body += struct.pack(">i", len(gcm_tags))
-    body += struct.pack(">q", FRAME_SIZE)
-    body += struct.pack(">i", frame_count)
+def footer_bytes(key, message_id, data_length):
+    body = struct.pack(">q", data_length)
+    body += struct.pack(">i", CHUNK_SIZE)
     body += message_id
     body += b""  # KeyMetadata (empty)
     body += struct.pack(">h", 0)  # KeyMetadataLength
@@ -124,15 +124,15 @@ def main():
     print("chunk1 tag         ", chunk_tags[1].hex())
 
     plaintext = golden_plaintext(GOLDEN_PLAINTEXT_LENGTH)
-    sealed = AESGCM(fk).encrypt(iv0[:12], plaintext, None)
-    ciphertext, tag = sealed[:-16], sealed[-16:]
-    footer = footer_bytes(fk, MESSAGE_ID, [tag], 1)
-    print("ciphertext[0:32]   ", ciphertext[:32].hex())
-    print("frame0 gcm tag     ", tag.hex())
+    ciphertext, tags = seal_chunks(fk, plaintext)
+    footer = footer_bytes(fk, MESSAGE_ID, len(plaintext))
+    print("golden ct[0:32]    ", ciphertext[:32].hex())
+    for i, tag in enumerate(tags):
+        print("golden tag %d       " % i, tag.hex())
     print("footer (%d bytes)  " % len(footer), footer.hex())
 
-    with open(os.path.join(out_dir, "golden-v1.osef"), "wb") as f:
-        f.write(ciphertext + footer)
+    with open(os.path.join(out_dir, "golden-v2.osef"), "wb") as f:
+        f.write(ciphertext + b"".join(tags) + footer)
 
 
 if __name__ == "__main__":

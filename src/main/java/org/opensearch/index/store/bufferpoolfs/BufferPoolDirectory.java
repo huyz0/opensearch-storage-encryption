@@ -276,7 +276,7 @@ public class BufferPoolDirectory extends FSDirectory {
         // Check cache first for fast path
         EncryptionFooter cachedFooter = encryptionMetadataCache.getFooter(normalizedPath);
         if (cachedFooter != null) {
-            return rawFileSize - cachedFooter.getFooterLength();
+            return cachedFooter.getDataLength();
         }
 
         // Cache miss - read footer from disk (happens during file open before cache populated)
@@ -285,7 +285,7 @@ public class BufferPoolDirectory extends FSDirectory {
 
             // Metadata is already cached by readViaFileChannel
 
-            return rawFileSize - footer.getFooterLength();
+            return footer.getDataLength();
         } catch (EncryptionFooter.NotOSEFFileException e) {
             // Not an encrypted file - return raw size
             return rawFileSize;
