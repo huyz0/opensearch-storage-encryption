@@ -18,6 +18,7 @@ import org.opensearch.common.settings.Settings;
 import org.opensearch.index.store.block.RefCountedMemorySegment;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheBuilder;
+import org.opensearch.index.store.block_loader.ChunkTagCache;
 import org.opensearch.index.store.block_loader.DirectIOReaderUtil;
 import org.opensearch.index.store.block_loader.FileChannelCache;
 import org.opensearch.index.store.read_ahead.Worker;
@@ -56,6 +57,7 @@ public final class PoolBuilder {
         private final java.util.concurrent.ThreadPoolExecutor removalExecutor;
         private final ExecutorService readAheadExecutor;
         private final FileChannelCache fileChannelCache;
+        private final ChunkTagCache chunkTagCache = new ChunkTagCache(ChunkTagCache.DEFAULT_MAX_BYTES);
 
         PoolResources(
             Pool<RefCountedMemorySegment> segmentPool,
@@ -146,10 +148,20 @@ public final class PoolBuilder {
         }
 
         /**
+         * Returns the shared cache of encrypted files' chunk tag pages.
+         *
+         * @return the chunk tag cache
+         */
+        public ChunkTagCache getChunkTagCache() {
+            return chunkTagCache;
+        }
+
+        /**
          * Closes the shared pool resources, stops the telemetry thread, and shuts down executors.
          */
         @Override
         public void close() {
+            chunkTagCache.clear();
             if (fileChannelCache != null) {
                 fileChannelCache.close();
             }
