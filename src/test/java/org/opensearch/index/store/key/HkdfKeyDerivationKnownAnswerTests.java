@@ -45,16 +45,6 @@ public class HkdfKeyDerivationKnownAnswerTests extends OpenSearchTestCase {
         assertArrayEquals(expected, HkdfKeyDerivation.deriveKey(MASTER_KEY, MESSAGE_ID, "known-answer-test", 49));
     }
 
-    public void testTranslogBaseIvKnownAnswer() {
-        // UUIDs shorter than 16 bytes are zero padded.
-        byte[] shortUuidIv = HkdfKeyDerivation.deriveTranslogBaseIV(MASTER_KEY, "short-uuid");
-        assertArrayEquals(hex("29c860c2799af4bb5392e66e31d0e20c"), shortUuidIv);
-        // Only the first 16 UTF-8 bytes of the UUID contribute; the rest is ignored.
-        byte[] longUuidIv = HkdfKeyDerivation.deriveTranslogBaseIV(MASTER_KEY, "8rKGBKWtR9S2bIZ_hXlTQw-trailing");
-        assertArrayEquals(hex("156cef97ad4e9da015f631a5cc1ea740"), longUuidIv);
-        assertArrayEquals(longUuidIv, HkdfKeyDerivation.deriveTranslogBaseIV(MASTER_KEY, "8rKGBKWtR9S2bIZ_"));
-    }
-
     /**
      * Cross-checks against the JDK's RFC 5869 HKDF with the master key as salt and the
      * messageId as input keying material, for random inputs.

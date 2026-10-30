@@ -1,12 +1,22 @@
 name: CI
 
+# Verification only: builds and tests every push to main and every PR.
+# Nothing here publishes or releases artifacts.
 on:
   push:
     branches:
       - main
   pull_request:
     branches:
-      - "*"
+      # "**" also matches base branches containing "/", so stacked PRs are verified too.
+      - "**"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Superseded PR pushes are cancelled; every main push keeps its own run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   GRADLE_OPTS: -Dhttp.keepAlive=false
 

@@ -13,6 +13,8 @@ import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
+import java.nio.channels.ClosedByInterruptException;
+import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
@@ -52,6 +54,7 @@ import org.opensearch.index.store.pool.Pool;
 @SuppressWarnings("preview")
 public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySegment> {
     private static final Logger LOGGER = LogManager.getLogger(CryptoDirectIOBlockLoader.class);
+    private static final int MAX_READ_ATTEMPTS = 3;
 
     private final KeyResolver keyResolver;
     private final Pool<RefCountedMemorySegment> segmentPool;
@@ -96,8 +99,13 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         long readLength = blockCount << CACHE_BLOCK_SIZE_POWER;
         String normalizedPath = filePath.toAbsolutePath().normalize().toString();
 
-        try (Arena arena = Arena.ofConfined(); RefCountedChannel ref = fileChannelCache.acquire(normalizedPath)) {
-            MemorySegment readBytes = directIOReadAligned(ref.channel(), filePath, startOffset, readLength, arena);
+        // Take the pool segments before any I/O. Under pool pressure the block cache retries this load,
+        // and failing here keeps each retry from re-reading and re-decrypting the block.
+        acquireSegments(result, poolTimeoutMs);
+        boolean success = false;
+
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment readBytes = readAligned(normalizedPath, filePath, startOffset, readLength, arena);
             long bytesRead = readBytes.byteSize();
 
             byte[] masterKey = keyResolver.getDataKey().getEncoded();
@@ -130,44 +138,88 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
 
             int blockIndex = 0;
             long bytesCopied = 0;
-
-            try {
-                while (blockIndex < blockCount && bytesCopied < bytesRead) {
-                    RefCountedMemorySegment handle = segmentPool.tryAcquire(poolTimeoutMs, TimeUnit.MILLISECONDS);
-                    MemorySegment pooled = handle.segment();
-
-                    int remaining = (int) (bytesRead - bytesCopied);
-                    int toCopy = Math.min(CACHE_BLOCK_SIZE, remaining);
-
-                    if (toCopy > 0) {
-                        MemorySegment.copy(readBytes, bytesCopied, pooled, 0, toCopy);
-                    }
-
-                    result[blockIndex++] = handle;
-                    bytesCopied += toCopy;
-                }
-            } catch (InterruptedException e) {
-                releaseHandles(result, blockIndex);
-                Thread.currentThread().interrupt();
-                throw new IOException("Interrupted while acquiring pool segment", e);
-            } catch (IOException e) {
-                releaseHandles(result, blockIndex);
-                throw e;
+            while (blockIndex < blockCount && bytesCopied < bytesRead) {
+                int toCopy = (int) Math.min(CACHE_BLOCK_SIZE, bytesRead - bytesCopied);
+                MemorySegment.copy(readBytes, bytesCopied, result[blockIndex].segment(), 0, toCopy);
+                blockIndex++;
+                bytesCopied += toCopy;
             }
+            // Short read at EOF: hand back the segments that got no data
+            releaseHandles(result, blockIndex, result.length);
 
+            success = true;
             return result;
         } catch (NoSuchFileException e) {
+            throw e;
+        } catch (ClosedByInterruptException e) {
+            // Cancellation (e.g. recovery or shutdownNow), not a storage failure
+            LOGGER.debug("Bulk read interrupted: path={} offset={}", filePath, startOffset);
             throw e;
         } catch (Exception e) {
             LOGGER.error("Bulk read failed: path={} offset={} length={} err={}", filePath, startOffset, readLength, e.toString());
             throw e;
+        } finally {
+            if (!success) {
+                releaseHandles(result, 0, result.length);
+            }
         }
     }
 
-    private void releaseHandles(RefCountedMemorySegment[] handles, int upTo) {
-        for (int i = 0; i < upTo; i++) {
+    /**
+     * Reads through the shared cached channel. Another thread that is interrupted while reading the
+     * same file closes the channel for everyone (FileChannel is interruptible), which surfaces here as
+     * {@link java.nio.channels.AsynchronousCloseException}. That is not this reader's failure, so retry
+     * on a fresh channel. If this thread was the one interrupted, propagate the exception. Nothing else
+     * closes the channel mid-read: the ref held here keeps cache eviction from closing it.
+     */
+    private MemorySegment readAligned(String normalizedPath, Path filePath, long startOffset, long readLength, Arena arena)
+        throws IOException {
+        if (Thread.currentThread().isInterrupted()) {
+            // An already-cancelled thread would close the shared channel on its first read, and keep
+            // closing each replacement on every later load. Fail before touching it.
+            throw new ClosedByInterruptException();
+        }
+        for (int attempt = 1;; attempt++) {
+            // acquire() drops a closed channel from the cache and opens a new one
+            try (RefCountedChannel ref = fileChannelCache.acquire(normalizedPath)) {
+                return directIOReadAligned(ref.channel(), filePath, startOffset, readLength, arena);
+            } catch (ClosedChannelException e) {
+                if (e instanceof ClosedByInterruptException || Thread.currentThread().isInterrupted() || attempt >= MAX_READ_ATTEMPTS) {
+                    throw e;
+                }
+            }
+        }
+    }
+
+    /**
+     * Fills {@code into} from the pool, or releases what it took and throws. A pool timeout is reported as
+     * {@link PoolAcquireFailedException} so the block cache can free space and retry.
+     */
+    private void acquireSegments(RefCountedMemorySegment[] into, long poolTimeoutMs) throws Exception {
+        int acquired = 0;
+        try {
+            for (; acquired < into.length; acquired++) {
+                into[acquired] = segmentPool.tryAcquire(poolTimeoutMs, TimeUnit.MILLISECONDS);
+            }
+        } catch (InterruptedException e) {
+            releaseHandles(into, 0, acquired);
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while acquiring pool segment", e);
+        } catch (IOException e) {
+            releaseHandles(into, 0, acquired);
+            // The pool reports a timeout as a plain IOException
+            throw new PoolAcquireFailedException(e.getMessage(), e);
+        } catch (Exception e) {
+            releaseHandles(into, 0, acquired);
+            throw e;
+        }
+    }
+
+    private void releaseHandles(RefCountedMemorySegment[] handles, int from, int to) {
+        for (int i = from; i < to; i++) {
             if (handles[i] != null) {
                 handles[i].close();
+                handles[i] = null;
             }
         }
     }
