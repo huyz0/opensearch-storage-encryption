@@ -231,6 +231,16 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         }
     }
 
+    @Override
+    public boolean reservePoolSegment(long timeoutMs) throws InterruptedException {
+        return segmentPool.reserve(timeoutMs, TimeUnit.MILLISECONDS);
+    }
+
+    @Override
+    public void releasePoolReservation() {
+        segmentPool.releaseReservation();
+    }
+
     private void releaseHandles(RefCountedMemorySegment[] handles, int from, int to) {
         for (int i = from; i < to; i++) {
             if (handles[i] != null) {

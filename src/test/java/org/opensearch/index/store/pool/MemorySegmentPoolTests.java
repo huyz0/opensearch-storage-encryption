@@ -21,6 +21,7 @@ import org.opensearch.test.OpenSearchTestCase;
  * Unit tests for {@link MemorySegmentPool} - Simple Panama malloc/free based pool
  */
 @SuppressWarnings("preview")
+@com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters(filters = org.opensearch.index.store.CaffeineThreadLeakFilter.class)
 public class MemorySegmentPoolTests extends OpenSearchTestCase {
 
     private MemorySegmentPool pool;
@@ -564,5 +565,105 @@ public class MemorySegmentPoolTests extends OpenSearchTestCase {
 
         // Cleanup
         seg3.decRef();
+    }
+
+    /**
+     * Once callers are queued, segments go to them in arrival order, and a newcomer cannot take a
+     * segment that a queued caller is owed.
+     */
+    public void testWaitersAreServedInArrivalOrderWithoutBarging() throws Exception {
+        pool = new MemorySegmentPool(2 * 1024, 1024);
+        RefCountedMemorySegment a = pool.acquire();
+        RefCountedMemorySegment b = pool.acquire();
+
+        java.util.concurrent.CompletableFuture<RefCountedMemorySegment> first = waitInBackground();
+        assertBusy(() -> assertEquals(1, pool.waiterCount()));
+        java.util.concurrent.CompletableFuture<RefCountedMemorySegment> second = waitInBackground();
+        assertBusy(() -> assertEquals(2, pool.waiterCount()));
+
+        a.decRef();
+        RefCountedMemorySegment gotFirst = first.get(10, java.util.concurrent.TimeUnit.SECONDS);
+        assertNotNull(gotFirst);
+        assertFalse("the second waiter must not be served before the first", second.isDone());
+
+        // A newcomer arriving while the second caller waits must queue behind it, not take the next release.
+        java.util.concurrent.CompletableFuture<RefCountedMemorySegment> newcomer = waitInBackground();
+        assertBusy(() -> assertEquals(2, pool.waiterCount()));
+        b.decRef();
+        RefCountedMemorySegment gotSecond = second.get(10, java.util.concurrent.TimeUnit.SECONDS);
+        assertNotNull(gotSecond);
+        assertFalse(newcomer.isDone());
+
+        gotFirst.decRef();
+        assertNotNull(newcomer.get(10, java.util.concurrent.TimeUnit.SECONDS));
+        newcomer.get().decRef();
+        gotSecond.decRef();
+    }
+
+    /** A queued caller that times out passes its turn to the next one. */
+    public void testTimedOutWaiterPassesTurnOn() throws Exception {
+        pool = new MemorySegmentPool(1024, 1024);
+        RefCountedMemorySegment a = pool.acquire();
+
+        java.util.concurrent.CompletableFuture<Void> impatient = java.util.concurrent.CompletableFuture.runAsync(() -> {
+            try {
+                pool.tryAcquire(50, java.util.concurrent.TimeUnit.MILLISECONDS);
+                fail("should time out");
+            } catch (java.io.IOException expected) {} catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        assertBusy(() -> assertEquals(1, pool.waiterCount()));
+        java.util.concurrent.CompletableFuture<RefCountedMemorySegment> patient = waitInBackground();
+        impatient.get(10, java.util.concurrent.TimeUnit.SECONDS);
+
+        a.decRef();
+        RefCountedMemorySegment got = patient.get(10, java.util.concurrent.TimeUnit.SECONDS);
+        assertNotNull(got);
+        assertEquals(0, pool.waiterCount());
+        got.decRef();
+    }
+
+    /** reserve() takes a segment in turn and hands it to the same thread's next acquire without waiting. */
+    public void testReservationIsHeldForTheReservingThread() throws Exception {
+        pool = new MemorySegmentPool(1024, 1024);
+        assertTrue(pool.reserve(10, java.util.concurrent.TimeUnit.MILLISECONDS));
+        assertEquals("the reserved segment is out of the pool", 0, pool.availableMemoryAccurate());
+
+        java.util.concurrent.CompletableFuture<RefCountedMemorySegment> other = waitInBackground();
+        assertBusy(() -> assertEquals(1, pool.waiterCount()));
+
+        RefCountedMemorySegment mine = pool.tryAcquire(0, java.util.concurrent.TimeUnit.MILLISECONDS);
+        assertNotNull("the reserving thread gets its segment without waiting", mine);
+        assertFalse(other.isDone());
+        pool.releaseReservation(); // nothing left to release
+        mine.decRef();
+        other.get(10, java.util.concurrent.TimeUnit.SECONDS).decRef();
+    }
+
+    /** An unused reservation goes back to the pool, to the next waiter in line. */
+    public void testReleasedReservationGoesToNextWaiter() throws Exception {
+        pool = new MemorySegmentPool(1024, 1024);
+        assertTrue(pool.reserve(10, java.util.concurrent.TimeUnit.MILLISECONDS));
+        java.util.concurrent.CompletableFuture<RefCountedMemorySegment> other = waitInBackground();
+        assertBusy(() -> assertEquals(1, pool.waiterCount()));
+
+        pool.releaseReservation();
+        other.get(10, java.util.concurrent.TimeUnit.SECONDS).decRef();
+        assertEquals(1024, pool.availableMemoryAccurate());
+    }
+
+    private java.util.concurrent.CompletableFuture<RefCountedMemorySegment> waitInBackground() {
+        java.util.concurrent.CompletableFuture<RefCountedMemorySegment> result = new java.util.concurrent.CompletableFuture<>();
+        Thread t = new Thread(() -> {
+            try {
+                result.complete(pool.tryAcquire(10, java.util.concurrent.TimeUnit.SECONDS));
+            } catch (Throwable e) {
+                result.completeExceptionally(e);
+            }
+        });
+        t.setDaemon(true);
+        t.start();
+        return result;
     }
 }

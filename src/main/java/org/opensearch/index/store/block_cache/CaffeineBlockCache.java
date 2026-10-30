@@ -46,10 +46,8 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
     /** Total time a cache miss may wait for a free pool segment before failing (the old in-lock wait). */
     static final long DEFAULT_POOL_WAIT_BUDGET_MS = 5000;
 
-    /** Cold entries evicted per retry when a miss finds the segment pool exhausted. */
+    /** Cold entries evicted each time a miss finds the segment pool exhausted. */
     static final int POOL_PRESSURE_EVICTION_BATCH = 16;
-
-    private static final long MAX_POOL_RETRY_BACKOFF_MS = 32;
 
     /**
      * Constructs a new CaffeineBlockCache with the specified cache and block loader.
@@ -94,13 +92,12 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
     */
     @Override
     public BlockCacheValue<T> getOrLoad(BlockCacheKey key) throws IOException {
-        // The loader runs inside the map's compute lock, so it only waits briefly for a pool segment
-        // (BlockLoader.CACHE_LOAD_POOL_TIMEOUT_MS). When the pool is exhausted we evict cold entries
-        // and back off here, outside the lock, instead of convoying every thread that hashes to the
-        // same bin behind a multi-second wait that cannot free anything by itself.
+        // The loader runs inside the map's compute lock, so it never waits for a pool segment there
+        // (BlockLoader.CACHE_LOAD_POOL_TIMEOUT_MS). When the pool is exhausted we evict cold entries,
+        // then wait outside the lock in the pool's queue, which serves waiters in arrival order and
+        // holds the segment for this thread, and load again through the lock.
         long deadline = System.nanoTime() + poolWaitBudgetNanos;
-        long backoffMs = 1;
-        for (int attempt = 1;; attempt++) {
+        while (true) {
             try {
                 return loadOnce(key);
             } catch (UncheckedIOException e) {
@@ -109,25 +106,23 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
                     // from a block that failed authentication, which OpenSearch acts on as corruption.
                     throw e.getCause();
                 }
-                long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
-                if (remainingMs <= 0) {
-                    LOGGER.warn("Gave up loading {} after {} attempts: segment pool exhausted", key, attempt);
-                    throw e;
-                }
-                backoffMs = Math.min(backoffMs, remainingMs);
+            } finally {
+                // Unused if another thread cached the block while we waited; hand it to the next waiter
+                blockLoader.releasePoolReservation();
             }
-            // Evict on attempts 1, 2, 4, 8, ... so a long wait does not drain the whole shared cache
-            // when the segments are pinned by readers and evicting cannot free them.
-            if ((attempt & (attempt - 1)) == 0) {
-                relievePoolPressure();
-            }
+            relievePoolPressure();
+            long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+            boolean reserved;
             try {
-                Thread.sleep(backoffMs);
+                reserved = remainingMs > 0 && blockLoader.reservePoolSegment(remainingMs);
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 throw new InterruptedIOException("Interrupted while waiting for pool space to load " + key);
             }
-            backoffMs = Math.min(backoffMs * 2, MAX_POOL_RETRY_BACKOFF_MS);
+            if (!reserved) {
+                LOGGER.warn("Gave up loading {}: segment pool exhausted", key);
+                throw new BlockLoader.PoolAcquireFailedException("Segment pool exhausted; gave up loading " + key);
+            }
         }
     }
 

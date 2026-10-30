@@ -57,6 +57,7 @@ public class CaffeineBlockCachePoolPressureTests extends OpenSearchTestCase {
     private static final class PoolBackedLoader implements BlockLoader<RefCountedMemorySegment> {
         private final MemorySegmentPool pool;
         final List<Long> timeoutsMs = new CopyOnWriteArrayList<>();
+        final java.util.concurrent.atomic.AtomicInteger reservations = new java.util.concurrent.atomic.AtomicInteger();
 
         PoolBackedLoader(MemorySegmentPool pool) {
             this.pool = pool;
@@ -74,6 +75,17 @@ public class CaffeineBlockCachePoolPressureTests extends OpenSearchTestCase {
                 }
             }
             return result;
+        }
+
+        @Override
+        public boolean reservePoolSegment(long timeoutMs) throws InterruptedException {
+            reservations.incrementAndGet();
+            return pool.reserve(timeoutMs, TimeUnit.MILLISECONDS);
+        }
+
+        @Override
+        public void releasePoolReservation() {
+            pool.releaseReservation();
         }
     }
 
@@ -115,11 +127,12 @@ public class CaffeineBlockCachePoolPressureTests extends OpenSearchTestCase {
         assertTrue("miss took " + elapsedMs + " ms; it should not sit out the 5 s pool timeout", elapsedMs < 2000);
         assertNull("the coldest entry should have been evicted to free a segment", caffeine.getIfPresent(key(0)));
         assertNotNull(caffeine.getIfPresent(key(POOL_SEGMENTS)));
+        // the fills took one load each; the miss failed once under the map lock without waiting, reserved a
+        // segment outside the lock, and loaded again
+        assertEquals(POOL_SEGMENTS + 2, loader.timeoutsMs.size());
+        assertEquals(1, loader.reservations.get());
         for (long timeout : loader.timeoutsMs) {
-            assertTrue(
-                "loads inside the map lock must only wait briefly, got " + timeout,
-                timeout <= BlockLoader.CACHE_LOAD_POOL_TIMEOUT_MS
-            );
+            assertEquals("loads under the map lock must not wait for the pool", BlockLoader.CACHE_LOAD_POOL_TIMEOUT_MS, timeout);
         }
         caffeine.invalidateAll();
     }
@@ -138,13 +151,116 @@ public class CaffeineBlockCachePoolPressureTests extends OpenSearchTestCase {
             held[i] = pool.tryAcquire(10, TimeUnit.MILLISECONDS);
         }
         try {
-            Exception e = expectThrows(Exception.class, () -> cache.getOrLoad(key(0)));
-            assertTrue(e.getCause() instanceof BlockLoader.PoolAcquireFailedException);
-            assertTrue("should have retried, attempts=" + loader.timeoutsMs.size(), loader.timeoutsMs.size() > 1);
+            expectThrows(BlockLoader.PoolAcquireFailedException.class, () -> cache.getOrLoad(key(0)));
+            assertEquals("one attempt under the lock", 1, loader.timeoutsMs.size());
+            assertEquals("then one wait outside it", 1, loader.reservations.get());
         } finally {
             for (RefCountedMemorySegment segment : held) {
                 segment.decRef();
             }
         }
+    }
+
+    /**
+     * Misses waiting for pool space are served in arrival order. The first miss to start waiting gets
+     * the first freed segment, even though a later miss is also waiting for it.
+     */
+    public void testWaitingMissesAreServedInArrivalOrder() throws Exception {
+        Cache<BlockCacheKey, BlockCacheValue<RefCountedMemorySegment>> caffeine = Caffeine.newBuilder().maximumSize(1000).build();
+        PoolBackedLoader loader = new PoolBackedLoader(pool);
+        CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment> cache = new CaffeineBlockCache<>(
+            caffeine,
+            loader,
+            1000,
+            10_000
+        );
+
+        RefCountedMemorySegment[] held = new RefCountedMemorySegment[POOL_SEGMENTS];
+        for (int i = 0; i < POOL_SEGMENTS; i++) {
+            held[i] = pool.tryAcquire(10, TimeUnit.MILLISECONDS);
+        }
+        java.util.concurrent.CompletableFuture<BlockCacheValue<RefCountedMemorySegment>> first =
+            new java.util.concurrent.CompletableFuture<>();
+        java.util.concurrent.CompletableFuture<BlockCacheValue<RefCountedMemorySegment>> second =
+            new java.util.concurrent.CompletableFuture<>();
+        Thread firstThread = missInBackground(cache, key(100), first);
+        // wait until the first miss is queued in its wait outside the lock
+        assertBusy(() -> {
+            assertEquals(1, loader.reservations.get());
+            assertEquals(1, pool.waiterCount());
+        });
+        Thread secondThread = missInBackground(cache, key(200), second);
+        assertBusy(() -> {
+            assertEquals(2, loader.reservations.get());
+            assertEquals(2, pool.waiterCount());
+        });
+
+        held[0].decRef();
+        assertNotNull(first.get(10, TimeUnit.SECONDS));
+        // the second miss is still queued; it must not have taken the first miss's segment
+        assertFalse(second.isDone());
+        assertEquals(1, pool.waiterCount());
+
+        held[1].decRef();
+        assertNotNull(second.get(10, TimeUnit.SECONDS));
+        firstThread.join();
+        secondThread.join();
+
+        for (int i = 2; i < POOL_SEGMENTS; i++) {
+            held[i].decRef();
+        }
+        caffeine.asMap().values().forEach(BlockCacheValue::close);
+        caffeine.asMap().clear();
+    }
+
+    /**
+     * A miss that waited for a segment, only to find that another thread cached the block meanwhile,
+     * returns the cached block and gives its reserved segment back to the pool.
+     */
+    public void testReservedSegmentIsReturnedWhenAnotherThreadCachedTheBlock() throws Exception {
+        Cache<BlockCacheKey, BlockCacheValue<RefCountedMemorySegment>> caffeine = Caffeine.newBuilder().maximumSize(1000).build();
+        PoolBackedLoader loader = new PoolBackedLoader(pool);
+        CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment> cache = new CaffeineBlockCache<>(caffeine, loader, 1000, 10_000);
+
+        RefCountedMemorySegment[] held = new RefCountedMemorySegment[POOL_SEGMENTS];
+        for (int i = 0; i < POOL_SEGMENTS; i++) {
+            held[i] = pool.tryAcquire(10, TimeUnit.MILLISECONDS);
+        }
+        java.util.concurrent.CompletableFuture<BlockCacheValue<RefCountedMemorySegment>> miss = new java.util.concurrent.CompletableFuture<>();
+        Thread t = missInBackground(cache, key(7), miss);
+        assertBusy(() -> {
+            assertEquals(1, loader.reservations.get());
+            assertEquals(1, pool.waiterCount());
+        });
+
+        // another thread caches the block with a segment it already had
+        caffeine.put(key(7), held[POOL_SEGMENTS - 1]);
+        held[0].decRef(); // frees a segment for the waiting miss
+
+        assertSame(held[POOL_SEGMENTS - 1], miss.get(10, TimeUnit.SECONDS));
+        t.join();
+        assertEquals("the reserved segment went back to the pool unused", SEGMENT_SIZE, pool.availableMemoryAccurate());
+
+        for (int i = 1; i < POOL_SEGMENTS - 1; i++) {
+            held[i].decRef();
+        }
+        caffeine.asMap().values().forEach(BlockCacheValue::close);
+        caffeine.asMap().clear();
+    }
+
+    private static Thread missInBackground(
+        CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment> cache,
+        BlockCacheKey key,
+        java.util.concurrent.CompletableFuture<BlockCacheValue<RefCountedMemorySegment>> result
+    ) {
+        Thread t = new Thread(() -> {
+            try {
+                result.complete(cache.getOrLoad(key));
+            } catch (Throwable e) {
+                result.completeExceptionally(e);
+            }
+        }, "miss-" + key.offset());
+        t.start();
+        return t;
     }
 }
