@@ -13,13 +13,13 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.index.store.key.KeyResolver;
 
 /**
- * A Translog implementation that provides AES-GCM encryption capabilities.
+ * A Translog implementation that encrypts translog files.
  * 
  * This class extends LocalTranslog and injects a CryptoChannelFactory during construction
  * to ensure that all translog file operations go through encrypted channels.
  *
- * Translog files (.tlog) are encrypted using AES-GCM with 8KB authenticated chunks.
- * Each chunk includes a 16-byte authentication tag for data integrity verification.
+ * Translog files (.tlog) are encrypted with offset-keyed AES-CTR and a random nonce per
+ * file; see {@link CryptoFileChannelWrapper} for the format.
  * Checkpoint files (.ckp) remain unencrypted for performance and compatibility.
  *
  * Uses unified KeyResolver (same as index files) for consistent
@@ -35,7 +35,7 @@ public class CryptoTranslog extends LocalTranslog {
     private final String translogUUID;
 
     /**
-     * Creates a new CryptoTranslog with AES-GCM encryption.
+     * Creates a new CryptoTranslog with translog encryption.
      *
      * @param config the translog configuration
      * @param translogUUID the translog UUID
@@ -85,7 +85,7 @@ public class CryptoTranslog extends LocalTranslog {
     }
 
     /**
-     * Creates a new CryptoTranslog with AES-GCM encryption and custom TranslogOperationHelper.
+     * Creates a new CryptoTranslog with translog encryption and custom TranslogOperationHelper.
      *
      * @param config the translog configuration
      * @param translogUUID the translog UUID

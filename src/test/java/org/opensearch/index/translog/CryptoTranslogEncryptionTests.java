@@ -293,4 +293,31 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
             assertEquals(testData[testData.length - 1], last.get(0));
         }
     }
+
+    /**
+     * The decrypting stream must yield the plaintext header followed by the plaintext data. A read
+     * that started in the header used to run on into the raw ciphertext.
+     */
+    public void testDecryptingStreamReturnsWholePlaintext() throws IOException {
+        String testTranslogUUID = "test-stream-uuid";
+        CryptoChannelFactory channelFactory = new CryptoChannelFactory(keyResolver, testTranslogUUID);
+        Path translogPath = tempDir.resolve("test-stream.tlog");
+        byte[] testData = randomByteArrayOfLength(randomIntBetween(1, 20_000));
+
+        int headerSize;
+        try (FileChannel writeChannel = channelFactory.open(translogPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+            TranslogHeader header = new TranslogHeader(testTranslogUUID, 1L);
+            header.write(writeChannel, false);
+            headerSize = header.sizeInBytes();
+            writeChannel.write(ByteBuffer.wrap(testData), headerSize);
+        }
+
+        byte[] expected = new byte[headerSize + testData.length];
+        System.arraycopy(Files.readAllBytes(translogPath), 0, expected, 0, headerSize);
+        System.arraycopy(testData, 0, expected, headerSize, testData.length);
+
+        try (CryptoDecryptingInputStream in = new CryptoDecryptingInputStream(translogPath, keyResolver, testTranslogUUID)) {
+            assertArrayEquals(expected, in.readAllBytes());
+        }
+    }
 }

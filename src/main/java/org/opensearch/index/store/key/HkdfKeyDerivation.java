@@ -99,19 +99,4 @@ public class HkdfKeyDerivation {
     public static byte[] deriveFileKey(byte[] masterKey, byte[] messageId) {
         return deriveKey(masterKey, messageId, "file-encryption", 32);
     }
-
-    /**
-     * Derive base IV for translog encryption from master key and translog UUID.
-     * This ensures deterministic IV generation for translog files.
-     *
-     * @param masterKey the master key (32 bytes)
-     * @param translogUUID the translog UUID string
-     * @return derived 16-byte base IV for translog
-     */
-    public static byte[] deriveTranslogBaseIV(byte[] masterKey, String translogUUID) {
-        byte[] uuidBytes = translogUUID.getBytes(StandardCharsets.UTF_8);
-        byte[] paddedUuid = new byte[16];
-        System.arraycopy(uuidBytes, 0, paddedUuid, 0, Math.min(uuidBytes.length, 16));
-        return deriveKey(masterKey, paddedUuid, "translog-base-iv", 16);
-    }
 }
