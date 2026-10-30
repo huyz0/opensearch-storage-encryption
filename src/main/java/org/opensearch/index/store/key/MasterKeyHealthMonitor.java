@@ -4,6 +4,9 @@
  */
 package org.opensearch.index.store.key;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -22,8 +25,10 @@ import org.opensearch.action.admin.indices.settings.put.UpdateSettingsRequest;
 import org.opensearch.cluster.ClusterState;
 import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.cluster.service.ClusterService;
+import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
+import org.opensearch.core.action.ActionListener;
 import org.opensearch.index.store.CryptoDirectoryFactory;
 import org.opensearch.transport.client.Client;
 
@@ -67,6 +72,34 @@ public class MasterKeyHealthMonitor {
     // Grace period between write and read block (allows in-flight reads to complete)
     private static final long BLOCK_GRACE_PERIOD_SECONDS = 10;
 
+    static final String WRITE_BLOCK = "write";
+    static final String READ_BLOCK = "read";
+
+    /**
+     * Records which index blocks ({@code write}, {@code read}) the key health monitor set on an index.
+     * It is stored in the index settings, in the same update as the block itself, so ownership survives
+     * node restarts and is visible to every node. The monitor only ever removes blocks listed here, so
+     * blocks set by anything else (a shrink, an operator freeze) are left alone.
+     */
+    public static final Setting<List<String>> INDEX_HEALTH_MONITOR_BLOCKS_SETTING = Setting
+        .listSetting(
+            "index.store.crypto.health_monitor_blocks",
+            Collections.emptyList(),
+            MasterKeyHealthMonitor::parseOwnedBlock,
+            Setting.Property.IndexScope,
+            Setting.Property.Dynamic,
+            Setting.Property.NotCopyableOnResize
+        );
+
+    private static String parseOwnedBlock(String value) {
+        if (WRITE_BLOCK.equals(value) == false && READ_BLOCK.equals(value) == false) {
+            throw new IllegalArgumentException(
+                "invalid value [" + value + "] for [index.store.crypto.health_monitor_blocks], expected [write] or [read]"
+            );
+        }
+        return value;
+    }
+
     /**
      * Tracks failure state for an index and block status.
      */
@@ -75,6 +108,7 @@ public class MasterKeyHealthMonitor {
         final AtomicReference<Exception> lastException;
         volatile FailureType failureType;
         volatile boolean blocksApplied = false;
+        volatile boolean readBlockScheduled = false;
 
         FailureState(Exception exception, FailureType failureType) {
             this.lastFailureTimeMillis = new AtomicLong(System.currentTimeMillis());
@@ -182,142 +216,174 @@ public class MasterKeyHealthMonitor {
      * @param failureType the type of failure (TRANSIENT or CRITICAL)
      */
     public void reportFailure(String indexUuid, String indexName, Exception exception, FailureType failureType) {
-        FailureState state = failureTracker.get(indexUuid);
-
-        if (state == null) {
-            // First failure
-            state = new FailureState(exception, failureType);
-            failureTracker.put(indexUuid, state);
-
-            // Only apply blocks for CRITICAL errors with valid index name
-            if (failureType == FailureType.CRITICAL && indexName != null) {
-                applyBlocks(indexName);
-                state.blocksApplied = true;
-            }
-
-        } else {
-            // Subsequent failure
+        FailureState newState = new FailureState(exception, failureType);
+        FailureState existing = failureTracker.putIfAbsent(indexUuid, newState);
+        FailureState state = existing == null ? newState : existing;
+        if (existing != null) {
             state.recordFailure(exception, failureType);
+        }
 
-            // If error type escalated from transient to critical, apply blocks now
-            if (failureType == FailureType.CRITICAL && !state.blocksApplied && indexName != null) {
-                applyBlocks(indexName);
-                state.blocksApplied = true;
-            }
+        // Only apply blocks for CRITICAL errors with valid index name. This also re-asserts them on later
+        // critical failures: blocks are cluster-wide, so another node that recovered may have removed them.
+        if (failureType == FailureType.CRITICAL && indexName != null) {
+            applyBlocks(indexUuid, indexName, state);
+            state.blocksApplied = true;
         }
     }
 
     /**
      * Reports successful key load/reload for an index.
-     * Removes blocks if they were previously applied.
+     * Removes the blocks the monitor applied to the index, if any, even if this node has no
+     * record of the failure (for example after a restart).
      * 
      * @param indexUuid the index UUID
      * @param indexName the index name
      */
     public void reportSuccess(String indexUuid, String indexName) {
         FailureState state = failureTracker.remove(indexUuid);
-
-        if (state != null && state.blocksApplied && hasBlocks(indexName)) {
-            removeBlocks(indexName);
+        if (state != null) {
+            synchronized (state) {
+                removeOwnedBlocks(indexName);
+            }
+        } else {
+            removeOwnedBlocks(indexName);
         }
     }
 
     /**
-     * Checks if read or write blocks are currently applied to the index.
-     * 
+     * Returns the current settings of the index, or {@code null} if the index is unknown.
+     *
      * @param indexName the index name
-     * @return true if either read or write blocks are applied, false otherwise
+     * @return the index settings, or null
      */
-    private boolean hasBlocks(String indexName) {
+    private Settings currentIndexSettings(String indexName) {
         try {
             if (indexName == null) {
-                return false;
+                return null;
             }
 
             ClusterState clusterState = clusterService.state();
             if (clusterState == null) {
-                return false;
+                return null;
             }
 
             IndexMetadata indexMetadata = clusterState.metadata().index(indexName);
-            if (indexMetadata == null) {
-                return false;
-            }
-
-            Settings indexSettings = indexMetadata.getSettings();
-
-            // Check for read or write blocks
-            boolean readBlock = indexSettings.getAsBoolean("index.blocks.read", false);
-            boolean writeBlock = indexSettings.getAsBoolean("index.blocks.write", false);
-
-            return readBlock || writeBlock;
+            return indexMetadata == null ? null : indexMetadata.getSettings();
         } catch (Exception e) {
-            return false; // Assume no blocks on error
+            return null;
         }
+    }
+
+    private static boolean hasBlock(Settings indexSettings, String block) {
+        return indexSettings != null && indexSettings.getAsBoolean(block, false);
     }
 
     /**
      * Applies read and write blocks sequentially to allow graceful degradation.
      * First applies write block to prevent new data, schedules read block after a grace period
      * to allow in-flight reads to complete using cached keys.
-     * 
+     *
+     * A block that is already set on the index is left alone and not recorded in
+     * {@link #INDEX_HEALTH_MONITOR_BLOCKS_SETTING}, so recovery never removes blocks set by someone else.
+     * The read block is skipped if the index recovers during the grace period.
+     *
      * Operations are async to avoid blocking the health check thread.
-     * 
+     *
+     * @param indexUuid the index UUID
      * @param indexName the index name
+     * @param state the failure state for the index
      */
-    private void applyBlocks(String indexName) {
-        try {
-            if (indexName == null) {
+    private void applyBlocks(String indexUuid, String indexName, FailureState state) {
+        if (indexName == null) {
+            return;
+        }
+
+        // Apply write block first - prevents new writes that would need encryption keys
+        applyBlock(indexName, WRITE_BLOCK);
+
+        // Step 2: Schedule read block after grace period on existing executor
+        synchronized (state) {
+            if (state.readBlockScheduled) {
                 return;
             }
-
-            // Apply write block first - prevents new writes that would need encryption keys
-            // Async: don't wait for cluster state update
-            Settings writeBlockSettings = Settings.builder().put("index.blocks.write", true).build();
-            UpdateSettingsRequest writeBlockRequest = new UpdateSettingsRequest(writeBlockSettings, indexName);
-            client.admin().indices().updateSettings(writeBlockRequest);
-            logger.info("Applied write block to index {}", indexName);
-
-            // Step 2: Schedule read block after grace period on existing executor
+            state.readBlockScheduled = true;
+        }
+        try {
             healthCheckExecutor.schedule(() -> {
-                try {
-                    Settings readBlockSettings = Settings.builder().put("index.blocks.read", true).build();
-                    UpdateSettingsRequest readBlockRequest = new UpdateSettingsRequest(readBlockSettings, indexName);
-                    client.admin().indices().updateSettings(readBlockRequest);
-                } catch (Exception e) {
-                    logger.error("Failed to apply read block to index {}: {}", indexName, e.getMessage());
+                synchronized (state) {
+                    state.readBlockScheduled = false;
+                    // Checked under the lock that reportSuccess holds while clearing, so a recovered index
+                    // can't be re-blocked
+                    if (failureTracker.get(indexUuid) != state) {
+                        // Recovered (or tracking reset) during the grace period
+                        return;
+                    }
+                    applyBlock(indexName, READ_BLOCK);
                 }
             }, BLOCK_GRACE_PERIOD_SECONDS, TimeUnit.SECONDS);
-
         } catch (Exception e) {
-            logger.error("Failed to apply write block to index {}: {}", indexName, e.getMessage(), e);
+            state.readBlockScheduled = false;
+            logger.error("Failed to schedule read block for index {}: {}", indexName, e.getMessage());
         }
     }
 
     /**
-     * Removes read and write blocks from the specified index when the encryption key 
-     * becomes available again. This restores full access after key recovery.
-     * 
-     * Operations are async to avoid blocking the health check thread.
-     * 
-     * @param indexName the index name
+     * Sets {@code index.blocks.<block>} and records it as owned by the monitor, in one settings update.
+     * Does nothing if the block is already set, whoever set it.
      */
-    private void removeBlocks(String indexName) {
+    private void applyBlock(String indexName, String block) {
         try {
-            if (indexName == null) {
+            Settings current = currentIndexSettings(indexName);
+            if (current == null) {
                 return;
             }
-
-            // Remove both read and write blocks
+            String blockKey = "index.blocks." + block;
+            if (hasBlock(current, blockKey)) {
+                logger.debug("Index {} already has a {} block; leaving it in place", indexName, block);
+                return;
+            }
+            List<String> owned = new ArrayList<>(INDEX_HEALTH_MONITOR_BLOCKS_SETTING.get(current));
+            if (owned.contains(block) == false) {
+                owned.add(block);
+            }
+            Settings update = Settings.builder().put(blockKey, true).putList(INDEX_HEALTH_MONITOR_BLOCKS_SETTING.getKey(), owned).build();
             // Async: don't wait for cluster state update
-            Settings settings = Settings.builder().putNull("index.blocks.read").putNull("index.blocks.write").build();
-            UpdateSettingsRequest request = new UpdateSettingsRequest(settings, indexName);
-            client.admin().indices().updateSettings(request);
+            client.admin().indices().updateSettings(new UpdateSettingsRequest(update, indexName));
+            logger.info("Applied {} block to index {}", block, indexName);
+        } catch (Exception e) {
+            logger.error("Failed to apply {} block to index {}: {}", block, indexName, e.getMessage(), e);
+        }
+    }
 
-            logger.info("Removed blocks from index {}", indexName);
-
+    /**
+     * Removes the blocks recorded in {@link #INDEX_HEALTH_MONITOR_BLOCKS_SETTING} when the encryption
+     * key becomes available again, and clears the record. Blocks set by anything else are kept.
+     * If the update fails, the record stays in the index settings and the next health check retries.
+     *
+     * @param indexName the index name
+     * @return true if a removal request was sent
+     */
+    private boolean removeOwnedBlocks(String indexName) {
+        try {
+            Settings current = currentIndexSettings(indexName);
+            if (current == null) {
+                return false;
+            }
+            List<String> owned = INDEX_HEALTH_MONITOR_BLOCKS_SETTING.get(current);
+            if (owned.isEmpty()) {
+                return false;
+            }
+            Settings.Builder update = Settings.builder().putNull(INDEX_HEALTH_MONITOR_BLOCKS_SETTING.getKey());
+            for (String block : owned) {
+                update.putNull("index.blocks." + block);
+            }
+            client.admin().indices().updateSettings(new UpdateSettingsRequest(update.build(), indexName), ActionListener.wrap(r -> {
+                logger.info("Removed blocks {} from index {}", owned, indexName);
+            }, e -> { logger.warn("Failed to remove blocks {} from index {}, will retry on next health check", owned, indexName, e); }));
+            return true;
         } catch (Exception e) {
             logger.error("Failed to remove blocks from index {}: {}", indexName, e.getMessage(), e);
+            return false;
         }
     }
 
@@ -462,14 +528,12 @@ public class MasterKeyHealthMonitor {
                         }
 
                         if (keyRecovered) {
-                            // Remove blocks if they exist
-                            if (hasBlocks(indexName)) {
-                                removeBlocks(indexName);
+                            // Remove only the blocks the monitor applied (recorded in the index settings, so
+                            // this also cleans up after a restart); blocks set by others are kept
+                            failureTracker.remove(indexUuid);
+                            if (removeOwnedBlocks(indexName)) {
                                 recoveredCount++;
                             }
-
-                            // Clean up failure tracker
-                            failureTracker.remove(indexUuid);
                         }
 
                     } catch (Exception recoveryException) {
@@ -494,24 +558,26 @@ public class MasterKeyHealthMonitor {
                         keyInCache = NodeLevelKeyCache.getInstance().isKeyPresentInCache(indexUuid, shardId, indexName);
                     }
 
-                    FailureState state = failureTracker.get(indexUuid);
+                    FailureState newState = new FailureState(e, failureType);
+                    FailureState state = failureTracker.putIfAbsent(indexUuid, newState);
                     if (state == null) {
-                        state = new FailureState(e, failureType);
-                        failureTracker.put(indexUuid, state);
+                        state = newState;
 
                         // Apply blocks only if:
                         // 1. Error is critical, AND
                         // 2. Key is NOT in cache (expired or never loaded)
                         if (indexName != null && !indexName.equals(indexUuid) && failureType == FailureType.CRITICAL && !keyInCache) {
-                            applyBlocks(indexName);
+                            applyBlocks(indexUuid, indexName, state);
                             state.blocksApplied = true;
                         }
                     } else {
                         state.recordFailure(e, failureType);
 
-                        if (failureType == FailureType.CRITICAL && !state.blocksApplied && !keyInCache) {
+                        // Re-assert on every critical failure, not just the first: another node may have
+                        // removed blocks it set when its own key recovered
+                        if (failureType == FailureType.CRITICAL && !keyInCache) {
                             if (indexName != null && !indexName.equals(indexUuid)) {
-                                applyBlocks(indexName);
+                                applyBlocks(indexUuid, indexName, state);
                                 state.blocksApplied = true;
                             }
                         }

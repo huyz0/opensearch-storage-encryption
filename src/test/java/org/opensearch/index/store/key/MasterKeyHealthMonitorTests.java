@@ -9,16 +9,19 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.junit.After;
 import org.junit.Before;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.opensearch.action.admin.indices.settings.put.UpdateSettingsRequest;
@@ -29,7 +32,9 @@ import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.action.ActionFuture;
+import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.core.action.ActionListener;
 import org.opensearch.index.store.key.MasterKeyHealthMonitor.FailureState;
 import org.opensearch.test.OpenSearchTestCase;
 import org.opensearch.transport.client.AdminClient;
@@ -498,5 +503,143 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         FailureType type = KeyCacheException.classify(wrapped);
 
         assertEquals("Wrapped DisabledException should be classified as CRITICAL", FailureType.CRITICAL, type);
+    }
+
+    private List<UpdateSettingsRequest> capturedUpdateRequests() {
+        ArgumentCaptor<UpdateSettingsRequest> captor = ArgumentCaptor.forClass(UpdateSettingsRequest.class);
+        verify(mockIndicesAdminClient, atLeastOnce()).updateSettings(captor.capture());
+        return captor.getAllValues();
+    }
+
+    @SuppressWarnings("unchecked")
+    private UpdateSettingsRequest capturedRemovalRequest() {
+        ArgumentCaptor<UpdateSettingsRequest> captor = ArgumentCaptor.forClass(UpdateSettingsRequest.class);
+        verify(mockIndicesAdminClient).updateSettings(captor.capture(), any(ActionListener.class));
+        return captor.getValue();
+    }
+
+    @SuppressWarnings("unchecked")
+    private void verifyNoRemoval() {
+        verify(mockIndicesAdminClient, never()).updateSettings(any(), any(ActionListener.class));
+    }
+
+    private static final String OWNED = "index.store.crypto.health_monitor_blocks";
+
+    /**
+     * Applying a block records it as owned in the same settings update
+     */
+    public void testAppliedBlockIsRecordedAsOwned() throws Exception {
+        when(mockIndexMetadata.getSettings()).thenReturn(Settings.EMPTY);
+
+        monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+
+        List<UpdateSettingsRequest> requests = capturedUpdateRequests();
+        assertEquals(1, requests.size());
+        Settings update = requests.get(0).settings();
+        assertEquals("true", update.get("index.blocks.write"));
+        assertEquals(List.of("write"), update.getAsList(OWNED));
+    }
+
+    /**
+     * Recovery removes the write block the monitor applied, and nothing else
+     */
+    public void testSuccessRemovesOnlyBlocksItApplied() throws Exception {
+        when(mockIndexMetadata.getSettings())
+            .thenReturn(Settings.builder().put("index.blocks.write", true).putList(OWNED, "write").build());
+
+        monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
+
+        Settings removal = capturedRemovalRequest().settings();
+        assertTrue(removal.keySet().contains("index.blocks.write"));
+        assertNull(removal.get("index.blocks.write"));
+        assertTrue(removal.keySet().contains(OWNED));
+        assertFalse("Read block was never applied, so it must not be removed", removal.keySet().contains("index.blocks.read"));
+    }
+
+    /**
+     * Owned blocks are removed even when this node lost its failure state (restart, or a different node)
+     */
+    public void testOwnedBlocksRemovedAfterLostState() throws Exception {
+        when(mockIndexMetadata.getSettings())
+            .thenReturn(
+                Settings.builder().put("index.blocks.write", true).put("index.blocks.read", true).putList(OWNED, "write", "read").build()
+            );
+        assertTrue("No local failure state", getFailureTracker().isEmpty());
+
+        monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
+
+        Settings removal = capturedRemovalRequest().settings();
+        assertTrue(removal.keySet().contains("index.blocks.write"));
+        assertTrue(removal.keySet().contains("index.blocks.read"));
+        assertTrue(removal.keySet().contains(OWNED));
+    }
+
+    /**
+     * A write block set by someone else (e.g. shrink, operator freeze) is never applied or removed by the monitor
+     */
+    public void testPreExistingWriteBlockIsLeftAlone() throws Exception {
+        // Shrink sets index.blocks.write=true on the source index before the KMS failure
+        when(mockIndexMetadata.getSettings()).thenReturn(Settings.builder().put("index.blocks.write", true).build());
+
+        monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+        assertTrue("Index is still protected", getFailureTracker().get(TEST_INDEX_UUID).blocksApplied);
+
+        monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
+
+        verify(mockIndicesAdminClient, never()).updateSettings(any());
+        verifyNoRemoval();
+    }
+
+    /**
+     * Success never clears blocks the monitor doesn't own
+     */
+    public void testSuccessWithoutTrackedFailureKeepsExistingBlocks() throws Exception {
+        when(mockIndexMetadata.getSettings())
+            .thenReturn(Settings.builder().put("index.blocks.read", true).put("index.blocks.write", true).build());
+
+        monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
+
+        verify(mockIndicesAdminClient, never()).updateSettings(any());
+        verifyNoRemoval();
+    }
+
+    /**
+     * If another node removes the write block while this node still can't load the key,
+     * the next critical failure on this node re-applies it
+     */
+    public void testCriticalFailureReassertsRemovedBlock() throws Exception {
+        // Another node already set the write block
+        when(mockIndexMetadata.getSettings())
+            .thenReturn(Settings.builder().put("index.blocks.write", true).putList(OWNED, "write").build());
+        monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+        verify(mockIndicesAdminClient, never()).updateSettings(any());
+
+        // That node recovers and removes the block; this node is still failing
+        when(mockIndexMetadata.getSettings()).thenReturn(Settings.EMPTY);
+        monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+
+        List<UpdateSettingsRequest> requests = capturedUpdateRequests();
+        assertEquals(1, requests.size());
+        assertEquals("true", requests.get(0).settings().get("index.blocks.write"));
+        assertEquals(List.of("write"), requests.get(0).settings().getAsList(OWNED));
+    }
+
+    public void testOwnershipSettingIsDynamicIndexSetting() {
+        assertTrue(MasterKeyHealthMonitor.INDEX_HEALTH_MONITOR_BLOCKS_SETTING.isDynamic());
+        assertEquals(List.of(), MasterKeyHealthMonitor.INDEX_HEALTH_MONITOR_BLOCKS_SETTING.get(Settings.EMPTY));
+    }
+
+    public void testOwnershipSettingAcceptsOnlyWriteAndRead() {
+        assertEquals(
+            List.of("write", "read"),
+            MasterKeyHealthMonitor.INDEX_HEALTH_MONITOR_BLOCKS_SETTING.get(Settings.builder().putList(OWNED, "write", "read").build())
+        );
+        expectThrows(
+            IllegalArgumentException.class,
+            () -> MasterKeyHealthMonitor.INDEX_HEALTH_MONITOR_BLOCKS_SETTING.get(Settings.builder().putList(OWNED, "metadata").build())
+        );
+        assertTrue(
+            MasterKeyHealthMonitor.INDEX_HEALTH_MONITOR_BLOCKS_SETTING.getProperties().contains(Setting.Property.NotCopyableOnResize)
+        );
     }
 }
