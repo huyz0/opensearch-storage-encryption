@@ -121,12 +121,7 @@ public class FileChannelCache implements Closeable {
                 ref.acquire();
             } catch (IllegalStateException e) {
                 // Stale entry — evict and release its base ref to close the FD.
-                // asMap().remove(key, value) is a conditional remove — only removes
-                // if the mapping still points to this exact ref (avoids racing with
-                // a concurrent loader that already replaced it).
-                if (fdCache.asMap().remove(normalizedPath, ref)) {
-                    ref.releaseBase();
-                }
+                evictIfCurrent(normalizedPath, ref);
                 continue;
             }
             if (ref.channel().isOpen()) {
@@ -136,11 +131,17 @@ public class FileChannelCache implements Closeable {
             // (ClosedByInterruptException), even though other readers share it. Drop the dead
             // entry so the next attempt opens a fresh channel instead of failing until eviction.
             ref.close();
-            if (fdCache.asMap().remove(normalizedPath, ref)) {
-                ref.releaseBase();
-            }
+            evictIfCurrent(normalizedPath, ref);
         }
         throw new IOException("Failed to acquire FileChannel after " + MAX_ACQUIRE_RETRIES + " retries: " + normalizedPath);
+    }
+
+    private void evictIfCurrent(String normalizedPath, RefCountedChannel ref) {
+        // Conditional remove: only if the mapping still points to this exact ref, so we don't
+        // race with a concurrent loader that already replaced it.
+        if (fdCache.asMap().remove(normalizedPath, ref)) {
+            ref.releaseBase();
+        }
     }
 
     /**

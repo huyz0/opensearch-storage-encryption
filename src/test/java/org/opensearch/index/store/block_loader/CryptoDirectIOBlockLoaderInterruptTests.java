@@ -13,7 +13,7 @@ import java.nio.channels.ClosedByInterruptException;
 import java.nio.file.Path;
 import java.security.Provider;
 import java.security.Security;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.FSLockFactory;
@@ -157,15 +157,16 @@ public class CryptoDirectIOBlockLoaderInterruptTests extends OpenSearchTestCase 
 
     /**
      * Another thread's interrupt can close the shared channel after this reader acquired it. This
-     * reader was not interrupted, so it must retry on a fresh channel instead of failing.
+     * reader was not interrupted, so it must retry on a fresh channel instead of failing, even if it
+     * happens more than once.
      */
     public void testLoadRetriesWhenSharedChannelClosedByAnotherThread() throws Exception {
-        AtomicBoolean closeOnce = new AtomicBoolean(true);
+        AtomicInteger closesLeft = new AtomicInteger(2); // two interrupted neighbours in a row
         FileChannelCache sabotaging = new FileChannelCache(16, null) {
             @Override
             public RefCountedChannel acquire(String normalizedPath) throws IOException {
                 RefCountedChannel ref = super.acquire(normalizedPath);
-                if (closeOnce.compareAndSet(true, false)) {
+                if (closesLeft.getAndDecrement() > 0) {
                     ref.channel().close(); // simulates a concurrent interrupted reader of the same channel
                 }
                 return ref;
@@ -173,7 +174,7 @@ public class CryptoDirectIOBlockLoaderInterruptTests extends OpenSearchTestCase 
         };
         try {
             assertLoadsBlock(newLoader(sabotaging), 0);
-            assertFalse("the channel should have been closed once", closeOnce.get());
+            assertTrue("the channel should have been closed twice", closesLeft.get() < 0);
         } finally {
             sabotaging.close();
         }

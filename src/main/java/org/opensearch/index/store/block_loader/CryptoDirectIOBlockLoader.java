@@ -54,6 +54,7 @@ import org.opensearch.index.store.pool.Pool;
 @SuppressWarnings("preview")
 public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySegment> {
     private static final Logger LOGGER = LogManager.getLogger(CryptoDirectIOBlockLoader.class);
+    private static final int MAX_READ_ATTEMPTS = 3;
 
     private final KeyResolver keyResolver;
     private final Pool<RefCountedMemorySegment> segmentPool;
@@ -160,6 +161,10 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             return result;
         } catch (NoSuchFileException e) {
             throw e;
+        } catch (ClosedByInterruptException e) {
+            // Cancellation (e.g. recovery or shutdownNow), not a storage failure
+            LOGGER.debug("Bulk read interrupted: path={} offset={}", filePath, startOffset);
+            throw e;
         } catch (Exception e) {
             LOGGER.error("Bulk read failed: path={} offset={} length={} err={}", filePath, startOffset, readLength, e.toString());
             throw e;
@@ -169,20 +174,20 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
     /**
      * Reads through the shared cached channel. Another thread that is interrupted while reading the
      * same file closes the channel for everyone (FileChannel is interruptible), which surfaces here as
-     * {@link java.nio.channels.AsynchronousCloseException}. That is not this reader's failure, so retry once on a fresh
-     * channel. If this thread was the one interrupted, propagate the exception.
+     * {@link java.nio.channels.AsynchronousCloseException}. That is not this reader's failure, so retry
+     * on a fresh channel. If this thread was the one interrupted, propagate the exception. Nothing else
+     * closes the channel mid-read: the ref held here keeps cache eviction from closing it.
      */
     private MemorySegment readAligned(String normalizedPath, Path filePath, long startOffset, long readLength, Arena arena)
         throws IOException {
-        try (RefCountedChannel ref = fileChannelCache.acquire(normalizedPath)) {
-            return directIOReadAligned(ref.channel(), filePath, startOffset, readLength, arena);
-        } catch (ClosedChannelException e) {
-            if (e instanceof ClosedByInterruptException || Thread.currentThread().isInterrupted()) {
-                throw e;
-            }
-            // acquire() drops the closed channel from the cache and opens a new one
+        for (int attempt = 1;; attempt++) {
+            // acquire() drops a closed channel from the cache and opens a new one
             try (RefCountedChannel ref = fileChannelCache.acquire(normalizedPath)) {
                 return directIOReadAligned(ref.channel(), filePath, startOffset, readLength, arena);
+            } catch (ClosedChannelException e) {
+                if (e instanceof ClosedByInterruptException || Thread.currentThread().isInterrupted() || attempt >= MAX_READ_ATTEMPTS) {
+                    throw e;
+                }
             }
         }
     }
