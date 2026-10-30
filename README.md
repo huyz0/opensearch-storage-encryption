@@ -361,8 +361,8 @@ Use `-Pjmh.includes` to run a specific benchmark method (regex match):
 The plugin has no release yet and is not ready for production use. The items below are open issues with the current code, not design goals.
 
 ### Known security issues
-- **Translog nonce reuse.** Every translog chunk of a shard is encrypted with the same AES-GCM key and nonce. Anyone who can read the translog files can recover the XOR of two document sources and forge translog content. Treat translog contents as unprotected against disk access until this is fixed (upstream [PR #181](https://github.com/opensearch-project/opensearch-storage-encryption/pull/181)).
-- **Unauthenticated reads.** Lucene file contents are read with AES-CTR and the GCM tags are never checked. Someone with write access to the disk can flip chosen plaintext bits without detection.
+- **Translog encryption.** Translog encryption has a known weakness that is being fixed (upstream [PR #181](https://github.com/opensearch-project/opensearch-storage-encryption/pull/181)). Until then, don't rely on it to protect translog contents against someone with disk access.
+- **Read integrity.** Lucene file reads are not yet integrity-checked; tampering with files on disk may go undetected.
 - **Footer not bound to its file.** The footer does not include the index, shard or file name, so swapping or rolling back whole files is not detected.
 
 ### Durability and availability
