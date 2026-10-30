@@ -8,9 +8,11 @@ import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.Objects;
 import java.util.Set;
 
+import org.apache.lucene.util.IOUtils;
 import org.opensearch.index.store.key.KeyResolver;
 
 /**
@@ -47,12 +49,20 @@ public class CryptoChannelFactory implements ChannelFactory {
 
     @Override
     public FileChannel open(Path path, OpenOption... options) throws IOException {
-        FileChannel baseChannel = FileChannel.open(path, options);
-
         if (!path.getFileName().toString().endsWith(".tlog")) {
-            return baseChannel;
+            return FileChannel.open(path, options);
         }
-
-        return new CryptoFileChannelWrapper(baseChannel, keyResolver, path, Set.of(options), translogUUID);
+        Set<OpenOption> optionSet = Set.of(options);
+        if (optionSet.contains(StandardOpenOption.APPEND)) {
+            // The wrapper writes at explicit physical offsets past the hidden magic and nonce.
+            throw new IllegalArgumentException("APPEND is not supported for encrypted translog files: " + path);
+        }
+        FileChannel baseChannel = FileChannel.open(path, options);
+        try {
+            return new CryptoFileChannelWrapper(baseChannel, keyResolver, path, optionSet, translogUUID);
+        } catch (IOException | RuntimeException e) {
+            IOUtils.closeWhileHandlingException(baseChannel);
+            throw e;
+        }
     }
 }

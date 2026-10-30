@@ -27,7 +27,6 @@ public class DecryptingTransferSnapshot implements TransferSnapshot {
     private final TransferSnapshot delegate;
     private final KeyResolver keyResolver;
     private final String translogUUID;
-    private final CryptoChannelFactory cryptoFactory;
 
     /**
      * Creates a new DecryptingTransferSnapshot wrapping the provided snapshot.
@@ -35,18 +34,11 @@ public class DecryptingTransferSnapshot implements TransferSnapshot {
      * @param delegate the original TransferSnapshot to wrap
      * @param keyResolver the key resolver for decryption
      * @param translogUUID the translog UUID for encryption context
-     * @param cryptoFactory the crypto channel factory for finalizing ciphers
      */
-    public DecryptingTransferSnapshot(
-        TransferSnapshot delegate,
-        KeyResolver keyResolver,
-        String translogUUID,
-        CryptoChannelFactory cryptoFactory
-    ) {
+    public DecryptingTransferSnapshot(TransferSnapshot delegate, KeyResolver keyResolver, String translogUUID) {
         this.delegate = delegate;
         this.keyResolver = keyResolver;
         this.translogUUID = translogUUID;
-        this.cryptoFactory = cryptoFactory;
     }
 
     /**

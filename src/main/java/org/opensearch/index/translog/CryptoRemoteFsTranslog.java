@@ -40,7 +40,6 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
 
     private final KeyResolver keyResolver;
     private final String translogUUID;
-    private final CryptoChannelFactory cryptoFactory;
 
     public CryptoRemoteFsTranslog(
         TranslogConfig config,
@@ -74,10 +73,12 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
             createCryptoChannelFactory(keyResolver, translogUUID),
             true // isServerSideEncryptionEnabled
         );
+        if (!(this.channelFactory instanceof CryptoChannelFactory)) {
+            throw new IOException("Translog is not using the crypto channel factory; refusing to write plaintext");
+        }
 
         this.keyResolver = keyResolver;
         this.translogUUID = translogUUID;
-        this.cryptoFactory = (CryptoChannelFactory) this.channelFactory;
 
         try {
             TranslogTransferManager decryptingManager = createDecryptingTranslogTransferManager(
@@ -90,8 +91,7 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
                 remoteStoreSettings,
                 config.getIndexSettings().isTranslogMetadataEnabled(),
                 keyResolver,
-                translogUUID,
-                cryptoFactory
+                translogUUID
             );
 
             // Use reflection to replace the final field
@@ -117,8 +117,7 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
         RemoteStoreSettings remoteStoreSettings,
         boolean isTranslogMetadataEnabled,
         KeyResolver keyResolver,
-        String translogUUID,
-        CryptoChannelFactory cryptoFactory
+        String translogUUID
     ) {
         String indexUUID = shardId.getIndex().getUUID();
         String shardIdStr = String.valueOf(shardId.id());
@@ -160,8 +159,7 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
             remoteStoreSettings,
             isTranslogMetadataEnabled,
             keyResolver,
-            translogUUID,
-            cryptoFactory
+            translogUUID
         );
     }
 

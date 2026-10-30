@@ -363,7 +363,7 @@ Use `-Pjmh.includes` to run a specific benchmark method (regex match):
 The plugin has no release yet and is not ready for production use. The items below are open issues with the current code, not design goals.
 
 ### Known security issues
-- **Translog integrity.** Translog data is encrypted with AES-CTR, which hides its contents but does not detect tampering beyond core's per-operation checksums.
+- **Translog integrity.** Translog data is not authenticated yet. It is encrypted with AES-CTR, which hides its contents; core's per-operation checksums catch accidental corruption, not deliberate changes.
 - **Read integrity.** Lucene file reads are not yet integrity-checked; tampering with files on disk may go undetected.
 - **Footer not bound to its file.** The footer does not include the index, shard or file name, so swapping or rolling back whole files is not detected.
 

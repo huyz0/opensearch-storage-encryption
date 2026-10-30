@@ -30,7 +30,6 @@ public class DecryptingTranslogTransferManager extends TranslogTransferManager {
 
     private final KeyResolver keyResolver;
     private final String translogUUID;
-    private final CryptoChannelFactory cryptoFactory;
 
     /**
      * Creates a new DecryptingTranslogTransferManager with decryption capability.
@@ -45,7 +44,6 @@ public class DecryptingTranslogTransferManager extends TranslogTransferManager {
      * @param isTranslogMetadataEnabled whether translog metadata is enabled
      * @param keyResolver the key resolver for decryption
      * @param translogUUID the translog UUID for encryption context (must match encryption!)
-     * @param cryptoFactory the crypto channel factory for finalizing ciphers
      */
     public DecryptingTranslogTransferManager(
         ShardId shardId,
@@ -57,8 +55,7 @@ public class DecryptingTranslogTransferManager extends TranslogTransferManager {
         RemoteStoreSettings remoteStoreSettings,
         boolean isTranslogMetadataEnabled,
         KeyResolver keyResolver,
-        String translogUUID,
-        CryptoChannelFactory cryptoFactory
+        String translogUUID
     ) {
         super(
             shardId,
@@ -72,7 +69,6 @@ public class DecryptingTranslogTransferManager extends TranslogTransferManager {
         );
         this.keyResolver = keyResolver;
         this.translogUUID = translogUUID;
-        this.cryptoFactory = cryptoFactory;
     }
 
     /**
@@ -90,7 +86,7 @@ public class DecryptingTranslogTransferManager extends TranslogTransferManager {
         TranslogTransferListener translogTransferListener,
         CryptoMetadata cryptoMetadata
     ) throws IOException {
-        TransferSnapshot decryptingSnapshot = new DecryptingTransferSnapshot(transferSnapshot, keyResolver, translogUUID, cryptoFactory);
+        TransferSnapshot decryptingSnapshot = new DecryptingTransferSnapshot(transferSnapshot, keyResolver, translogUUID);
 
         // Call parent with decryption wrapper
         return super.transferSnapshot(decryptingSnapshot, translogTransferListener, cryptoMetadata);

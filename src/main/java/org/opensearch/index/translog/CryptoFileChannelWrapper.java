@@ -31,7 +31,7 @@ import org.opensearch.index.store.key.KeyResolver;
  * <p>File format:
  * <pre>
  * [TranslogHeader            - plaintext, written and read by core]
- * [magic "OST1"  (4 bytes)   - plaintext]
+ * [magic "OST2"  (4 bytes)   - plaintext]
  * [nonce         (16 bytes)  - plaintext, random per file]
  * [data                      - AES-CTR, see {@link TranslogCipher}]
  * </pre>
@@ -49,8 +49,11 @@ import org.opensearch.index.store.key.KeyResolver;
 @SuppressForbidden(reason = "FileChannel operations required for encrypted translog implementation")
 public class CryptoFileChannelWrapper extends FileChannel {
 
-    /** "OST1": OpenSearch translog, encryption format version 1. */
-    static final int MAGIC = 0x4F535431;
+    /**
+     * "OST2": OpenSearch translog, encryption format version 2 (per-file key derived with HKDF).
+     * Version 1 used the data key directly and is rejected as unsupported.
+     */
+    static final int MAGIC = 0x4F535432;
 
     /** Bytes between the core header and the encrypted data: magic plus nonce. */
     static final int PREFIX_LENGTH = Integer.BYTES + TranslogCipher.NONCE_LENGTH;
@@ -347,9 +350,18 @@ public class CryptoFileChannelWrapper extends FileChannel {
                 }
                 byte[] nonce = new byte[TranslogCipher.NONCE_LENGTH];
                 prefix.get(nonce);
-                cipher = new TranslogCipher(keyResolver.getDataKey(), nonce);
+                cipher = newCipher(nonce);
             }
             return cipher;
+        }
+    }
+
+    /** Builds the cipher for {@code nonce}, reporting a key failure as an IOException as core expects. */
+    private TranslogCipher newCipher(byte[] nonce) throws IOException {
+        try {
+            return new TranslogCipher(keyResolver.getDataKey(), nonce);
+        } catch (RuntimeException e) {
+            throw new IOException("Failed to resolve the data key for translog file " + filePath, e);
         }
     }
 
@@ -363,10 +375,12 @@ public class CryptoFileChannelWrapper extends FileChannel {
             if (cipher == null) {
                 byte[] nonce = new byte[TranslogCipher.NONCE_LENGTH];
                 RANDOM.nextBytes(nonce);
+                // Resolve the key first so a key failure leaves no prefix behind.
+                TranslogCipher fresh = newCipher(nonce);
                 ByteBuffer prefix = ByteBuffer.allocate(PREFIX_LENGTH);
                 prefix.putInt(MAGIC).put(nonce).flip();
                 writeFully(prefix, headerSize);
-                cipher = new TranslogCipher(keyResolver.getDataKey(), nonce);
+                cipher = fresh;
             }
             return cipher;
         }
@@ -384,7 +398,12 @@ public class CryptoFileChannelWrapper extends FileChannel {
         if (newPosition < 0) {
             throw new IllegalArgumentException("negative position: " + newPosition);
         }
-        position.set(newPosition);
+        positionLock.writeLock().lock();
+        try {
+            position.set(newPosition);
+        } finally {
+            positionLock.writeLock().unlock();
+        }
         return this;
     }
 
@@ -421,6 +440,12 @@ public class CryptoFileChannelWrapper extends FileChannel {
                     throw new IOException("Truncating an encrypted translog file that has data is not supported: " + filePath);
                 }
                 delegate.truncate(size);
+                if (size < headerSize + PREFIX_LENGTH) {
+                    // The prefix is gone, so the next data write must write a fresh nonce.
+                    synchronized (cipherLock) {
+                        cipher = null;
+                    }
+                }
             }
             if (position.get() > size) {
                 position.set(size);
