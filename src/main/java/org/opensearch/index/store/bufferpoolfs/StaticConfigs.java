@@ -7,6 +7,7 @@ package org.opensearch.index.store.bufferpoolfs;
 import java.nio.file.Path;
 
 import org.opensearch.index.store.PanamaNativeAccess;
+import org.opensearch.index.store.cipher.ChunkCipher;
 
 /**
  * Static configuration constants for the encrypted storage buffer pool and Direct I/O operations.
@@ -45,9 +46,10 @@ public class StaticConfigs {
     public static final int DIRECT_IO_WRITE_BUFFER_SIZE_POWER = 18;
 
     /** 
-     * Power of 2 for cache block size (2^13 = 8KB blocks).
+     * Power of 2 for cache block size (2^13 = 8KB blocks). A cache block is exactly one encrypted
+     * chunk, so the block loader can authenticate each block on its own.
      */
-    public static final int CACHE_BLOCK_SIZE_POWER = 13;
+    public static final int CACHE_BLOCK_SIZE_POWER = ChunkCipher.CHUNK_SIZE_POWER;
 
     /** 
      * Size of each cache block in bytes (8KB).

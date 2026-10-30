@@ -105,7 +105,9 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
                 return loadOnce(key);
             } catch (UncheckedIOException e) {
                 if (!(e.getCause() instanceof BlockLoader.PoolAcquireFailedException)) {
-                    throw e;
+                    // Unwrap so callers see the loader's IOException, e.g. a CorruptIndexException
+                    // from a block that failed authentication, which OpenSearch acts on as corruption.
+                    throw e.getCause();
                 }
                 long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
                 if (remainingMs <= 0) {
@@ -261,6 +263,9 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
 
             for (int i = 0; i < loadedBlocks.length; i++) {
                 V block = loadedBlocks[i];
+                if (block == null) {
+                    break; // the loader leaves blocks past the end of the file null
+                }
 
                 long blockOffset = startOffset + i * CACHE_BLOCK_SIZE;
                 BlockCacheKey key = createBlockKey(filePath, blockOffset);

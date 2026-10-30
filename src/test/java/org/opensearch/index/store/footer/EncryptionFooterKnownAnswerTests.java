@@ -17,6 +17,7 @@ import java.util.HexFormat;
 
 import javax.crypto.spec.SecretKeySpec;
 
+import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.store.FSLockFactory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
@@ -40,30 +41,36 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
     private static final byte[] MASTER_KEY = hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
     private static final byte[] MESSAGE_ID = hex("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf");
     private static final byte[] FILE_KEY = hex("eed4d15a63606f1a006ffad12ad89b6a06afe4198584def8bccd8c3351e146fb");
-    private static final byte[] FRAME_0_TAG = hex("3880401a2f71e0835650343c4661b358");
-
-    private static final String GOLDEN_FILE = "/org/opensearch/index/store/golden/golden-v1.osef";
-    private static final int GOLDEN_PLAINTEXT_LENGTH = 1000;
+    private static final String GOLDEN_FILE = "/org/opensearch/index/store/golden/golden-v2.osef";
+    /** Two full 8 KiB chunks and a 3616-byte tail. */
+    private static final int GOLDEN_PLAINTEXT_LENGTH = 20000;
+    private static final String GOLDEN_TAG_TABLE_HEX = "473cce9f2b0818086bf67a586a30061f"
+        + "b1f68af5d8293235634b20e7c0fe6e33"
+        + "2f472d32a61d2169cbb07cba8934ee62";
 
     /**
-     * Footer of the golden file: one 32 GiB frame, no key metadata. Big-endian fields, in order:
+     * Footer of the golden file, no key metadata. Big-endian fields, in order:
      * <pre>
-     * FooterAuthTag      a69f6a9f0c6c1e57c851c9253443d57d  GCM tag over the rest of the footer (as AAD)
-     * GCM tag, frame 0   3880401a2f71e0835650343c4661b358
-     * TagCount           00000001
-     * FrameSize          0000000800000000                  2^35
-     * FrameCount         00000001
+     * FooterAuthTag      8ef061dddcfe40529873d7cab3d6e95c  GCM tag over the rest of the footer (as AAD)
+     * DataLength         0000000000004e20                  20000
+     * ChunkSize          00002000                          8192
      * MessageId          a0a1a2a3a4a5a6a7a8a9aaabacadaeaf
      * KeyMetadataLength  0000                              KeyMetadata itself is empty
      * AlgorithmId        0001                              AES_256_GCM_CTR
-     * FooterLength       0000004c                          76, including the auth tag
+     * FooterLength       00000038                          56, including the auth tag
      * Magic              4f534546                          "OSEF"
      * </pre>
      */
-    private static final String FOOTER_TAGS_HEX = "a69f6a9f0c6c1e57c851c9253443d57d" + "3880401a2f71e0835650343c4661b358";
-    private static final String FOOTER_FRAMES_HEX = "00000001" + "0000000800000000" + "00000001";
-    private static final String FOOTER_TRAILER_HEX = "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf" + "0000" + "0001" + "0000004c" + "4f534546";
-    private static final byte[] GOLDEN_FOOTER = hex(FOOTER_TAGS_HEX + FOOTER_FRAMES_HEX + FOOTER_TRAILER_HEX);
+    private static final byte[] GOLDEN_FOOTER = hex(
+        "8ef061dddcfe40529873d7cab3d6e95c"
+            + "0000000000004e20"
+            + "00002000"
+            + "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"
+            + "0000"
+            + "0001"
+            + "00000038"
+            + "4f534546"
+    );
 
     @Override
     public void setUp() throws Exception {
@@ -72,27 +79,25 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
     }
 
     public void testFooterLayoutConstants() {
-        assertEquals(60, EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-        assertEquals(76, EncryptionMetadataTrailer.calculateFooterSize(1, 0));
-        assertEquals(1L << 35, EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE);
+        assertEquals(56, EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        assertEquals(56, EncryptionMetadataTrailer.calculateFooterSize(0));
         assertArrayEquals(new byte[] { 'O', 'S', 'E', 'F' }, EncryptionMetadataTrailer.MAGIC);
     }
 
     public void testSerializeKnownAnswer() throws IOException {
-        assertArrayEquals(GOLDEN_FOOTER, goldenFooter().serialize(null, FILE_KEY));
+        assertArrayEquals(GOLDEN_FOOTER, goldenFooter().serialize(FILE_KEY));
     }
 
     public void testDeserializeKnownAnswer() throws IOException {
         EncryptionFooter footer = EncryptionFooter.deserialize(GOLDEN_FOOTER, FILE_KEY);
         assertArrayEquals(MESSAGE_ID, footer.getMessageId());
-        assertEquals(1L << 35, footer.getFrameSize());
-        assertEquals(35, footer.getFrameSizePower());
-        assertEquals(1, footer.getFrameCount());
+        assertEquals(GOLDEN_PLAINTEXT_LENGTH, footer.getDataLength());
+        assertEquals(3 * 16 + GOLDEN_FOOTER.length, footer.getTrailerLength());
         assertEquals(1, footer.getAlgorithmId());
         assertEquals(GOLDEN_FOOTER.length, footer.getFooterLength());
         assertEquals(0, footer.getKeyMetadata().length);
         // Round trip is byte-identical.
-        assertArrayEquals(GOLDEN_FOOTER, footer.serialize(null, FILE_KEY));
+        assertArrayEquals(GOLDEN_FOOTER, footer.serialize(FILE_KEY));
     }
 
     public void testEveryFooterBitIsProtected() {
@@ -106,21 +111,23 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
     public void testWrongKeyRejected() {
         byte[] wrongKey = FILE_KEY.clone();
         wrongKey[0] ^= 1;
-        IOException e = expectThrows(IOException.class, () -> EncryptionFooter.deserialize(GOLDEN_FOOTER, wrongKey));
-        assertEquals("Footer authentication failed", e.getMessage());
+        CorruptIndexException e = expectThrows(CorruptIndexException.class, () -> EncryptionFooter.deserialize(GOLDEN_FOOTER, wrongKey));
+        assertEquals("Footer authentication failed", e.getOriginalMessage());
     }
 
     public void testGoldenFileLayout() throws Exception {
         byte[] file = Files.readAllBytes(getDataPath(GOLDEN_FILE));
-        assertEquals(GOLDEN_PLAINTEXT_LENGTH + GOLDEN_FOOTER.length, file.length);
-        assertArrayEquals(GOLDEN_FOOTER, Arrays.copyOfRange(file, GOLDEN_PLAINTEXT_LENGTH, file.length));
+        byte[] tagTable = hex(GOLDEN_TAG_TABLE_HEX);
+        assertEquals(GOLDEN_PLAINTEXT_LENGTH + tagTable.length + GOLDEN_FOOTER.length, file.length);
+        assertArrayEquals(tagTable, Arrays.copyOfRange(file, GOLDEN_PLAINTEXT_LENGTH, GOLDEN_PLAINTEXT_LENGTH + tagTable.length));
+        assertArrayEquals(GOLDEN_FOOTER, Arrays.copyOfRange(file, file.length - GOLDEN_FOOTER.length, file.length));
         int trailerStart = file.length - EncryptionMetadataTrailer.MIN_FOOTER_SIZE;
         assertEquals(GOLDEN_FOOTER.length, EncryptionFooter.calculateFooterLength(file, trailerStart));
     }
 
     /**
      * Reads the committed golden file through {@link CryptoNIOFSDirectory}. This is the
-     * backward-compatibility check: today's reader must decrypt a file in the v1 format.
+     * format check: today's reader must decrypt and authenticate a file in the v2 format.
      */
     public void testReadGoldenFileThroughDirectory() throws Exception {
         Path dir = createTempDir();
@@ -151,9 +158,8 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
     }
 
     private static EncryptionFooter goldenFooter() throws IOException {
-        EncryptionFooter footer = new EncryptionFooter(MESSAGE_ID, 1L << 35, (short) 1);
-        footer.addGcmTag(FRAME_0_TAG);
-        footer.setFrameCount(1);
+        EncryptionFooter footer = new EncryptionFooter(MESSAGE_ID, (short) 1);
+        footer.setDataLength(GOLDEN_PLAINTEXT_LENGTH);
         return footer;
     }
 
