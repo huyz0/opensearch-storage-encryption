@@ -21,6 +21,7 @@ import java.nio.file.StandardOpenOption;
 import java.security.SecureRandom;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.zip.CRC32;
@@ -321,8 +322,8 @@ public class CryptoFileChannelWrapper extends FileChannel {
         }
     }
 
-    /** Serialises in-place conversions so two opens of one file cannot race on its temporary file. */
-    private static final Object CONVERSION_LOCK = new Object();
+    /** Per-file locks so two opens of one file cannot race on its temporary file. */
+    private static final ConcurrentHashMap<Path, Object> CONVERSION_LOCKS = new ConcurrentHashMap<>();
 
     /**
      * Encrypts a translog file in place if its data is plaintext, and returns whether it did.
@@ -345,14 +346,33 @@ public class CryptoFileChannelWrapper extends FileChannel {
      */
     static boolean encryptIfPlaintext(Path path, KeyResolver keyResolver, String translogUUID) throws IOException {
         int headerSize = calculateTranslogHeaderSize(translogUUID);
-        synchronized (CONVERSION_LOCK) {
-            try (FileChannel raw = FileChannel.open(path, StandardOpenOption.READ)) {
-                if (startsWithPlaintextOperation(raw, headerSize) == false) {
-                    return false;
-                }
-                Path tmp = path.resolveSibling(path.getFileName() + ".encrypting");
-                Files.deleteIfExists(tmp);
-                Set<OpenOption> options = Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, StandardOpenOption.READ);
+        // Fast path without a lock: an encrypted or header-only file needs nothing.
+        try (FileChannel raw = FileChannel.open(path, StandardOpenOption.READ)) {
+            if (startsWithPlaintextOperation(raw, headerSize) == false) {
+                return false;
+            }
+        }
+        Path key = path.toAbsolutePath().normalize();
+        Object lock = CONVERSION_LOCKS.computeIfAbsent(key, k -> new Object());
+        try {
+            synchronized (lock) {
+                return encryptLocked(path, keyResolver, translogUUID, headerSize);
+            }
+        } finally {
+            CONVERSION_LOCKS.remove(key, lock);
+        }
+    }
+
+    private static boolean encryptLocked(Path path, KeyResolver keyResolver, String translogUUID, int headerSize) throws IOException {
+        Path tmp = path.resolveSibling(path.getFileName() + ".encrypting");
+        try (FileChannel raw = FileChannel.open(path, StandardOpenOption.READ)) {
+            // Check again: another open may have converted the file while this one waited.
+            if (startsWithPlaintextOperation(raw, headerSize) == false) {
+                return false;
+            }
+            Files.deleteIfExists(tmp);
+            Set<OpenOption> options = Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, StandardOpenOption.READ);
+            try {
                 try (
                     CryptoFileChannelWrapper out = new CryptoFileChannelWrapper(
                         FileChannel.open(tmp, options.toArray(new OpenOption[0])),
@@ -374,15 +394,15 @@ public class CryptoFileChannelWrapper extends FileChannel {
                         buf.clear();
                     }
                     out.force(true);
-                } catch (IOException | RuntimeException e) {
-                    IOUtils.deleteFilesIgnoringExceptions(tmp);
-                    throw e;
                 }
                 Files.move(tmp, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (IOException | RuntimeException e) {
+                IOUtils.deleteFilesIgnoringExceptions(tmp);
+                throw e;
             }
-            IOUtils.fsync(path.toAbsolutePath().getParent(), true);
-            return true;
         }
+        IOUtils.fsync(path.toAbsolutePath().getParent(), true);
+        return true;
     }
 
     /**
@@ -395,6 +415,9 @@ public class CryptoFileChannelWrapper extends FileChannel {
             return false;
         }
         int opSize = readInt(raw, headerSize);
+        if (opSize == MAGIC) {
+            return false; // already encrypted
+        }
         if (opSize < Integer.BYTES || opSize > dataLength - Integer.BYTES) {
             return false;
         }
