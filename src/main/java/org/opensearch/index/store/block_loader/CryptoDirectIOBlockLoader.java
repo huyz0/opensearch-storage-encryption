@@ -132,6 +132,8 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         acquireSegments(result, poolTimeoutMs);
         boolean success = false;
         long chunk = -1;
+        long dataLength = -1;
+        byte[] messageId = null;
 
         try (Arena arena = Arena.ofConfined()) {
             byte[] masterKey = keyResolver.getDataKey().getEncoded();
@@ -139,8 +141,19 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             // Get footer from disk and load metadata (footer + derived key) atomically into cache
             EncryptionFooter footer = readFooterFromDisk(normalizedPath, filePath, masterKey);
             var metadata = encryptionMetadataCache.getOrLoadMetadata(normalizedPath, footer, masterKey);
-            long dataLength = metadata.getFooter().getDataLength();
+            dataLength = metadata.getFooter().getDataLength();
             SecretKeySpec fileKey = new SecretKeySpec(metadata.getFileKey(), "AES");
+            messageId = metadata.getFooter().getMessageId();
+
+            // The footer and tags may come from caches, so check the size on every load: truncation is corruption.
+            long expectedSize = dataLength + metadata.getFooter().getTrailerLength();
+            long actualSize = Files.size(filePath);
+            if (actualSize != expectedSize) {
+                throw new CorruptIndexException(
+                    "encrypted file size " + actualSize + " does not match its footer (" + expectedSize + ")",
+                    filePath.toString()
+                );
+            }
 
             if (startOffset >= dataLength) {
                 throw new EOFException("Read at offset " + startOffset + " is past the end (" + dataLength + ") of " + filePath);
@@ -155,19 +168,16 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             if (ciphertext.byteSize() != readLength) {
                 throw new EOFException("Unexpected EOF reading " + chunks + " chunks at offset " + startOffset + " of " + filePath);
             }
-            ByteBuffer tags = tagCache.getTags(metadata.getFooter().getMessageId(), dataLength, firstChunk, chunks, (offset, length) -> {
-                // The footer may come from the cache, so check the size whenever tags come from disk:
-                // truncation is corruption. Chunks whose tags are cached verify against them regardless.
-                long expectedSize = dataLength + metadata.getFooter().getTrailerLength();
-                long actualSize = Files.size(filePath);
-                if (actualSize != expectedSize) {
-                    throw new CorruptIndexException(
-                        "encrypted file size " + actualSize + " does not match its footer (" + expectedSize + ")",
-                        filePath.toString()
-                    );
-                }
-                return readAligned(normalizedPath, filePath, dataLength + offset, length, arena).toArray(ValueLayout.JAVA_BYTE);
-            });
+            long tagTableStart = dataLength;
+            ByteBuffer tags = tagCache
+                .getTags(
+                    messageId,
+                    dataLength,
+                    firstChunk,
+                    chunks,
+                    (offset, length) -> readAligned(normalizedPath, filePath, tagTableStart + offset, length, arena)
+                        .toArray(ValueLayout.JAVA_BYTE)
+                );
 
             for (int blockIndex = 0; blockIndex < chunks; blockIndex++) {
                 chunk = firstChunk + blockIndex;
@@ -188,6 +198,8 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             success = true;
             return result;
         } catch (AEADBadTagException e) {
+            // Don't keep a tag page that may have been read badly; the next load reads it again.
+            tagCache.invalidate(messageId, dataLength, chunk);
             throw new CorruptIndexException("encrypted chunk " + chunk + " failed authentication", filePath.toString(), e);
         } catch (NoSuchFileException e) {
             throw e;

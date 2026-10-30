@@ -105,4 +105,30 @@ public class ChunkTagCacheTests extends OpenSearchTestCase {
         }
         assertTrue("cached pages: " + cache.estimatedSize(), cache.estimatedSize() <= 4);
     }
+
+    public void testSmallFilePagesAreWeighedWithOverhead() throws IOException {
+        // One-chunk files have 16-byte pages; the bound must still hold in entries, not just tag bytes.
+        long maxBytes = 100L * (TAG + ChunkTagCache.ENTRY_OVERHEAD_BYTES);
+        ChunkTagCache cache = new ChunkTagCache(maxBytes);
+        CountingReader reader = new CountingReader(table(1));
+        for (int i = 0; i < 1000; i++) {
+            cache.getTags(randomByteArrayOfLength(16), 100, 0, 1, reader);
+        }
+        assertTrue("cached pages: " + cache.estimatedSize(), cache.estimatedSize() <= 100);
+    }
+
+    public void testInvalidateDropsOnlyThatPage() throws IOException {
+        long chunks = 2L * PAGE;
+        long dataLength = chunks * ChunkCipher.CHUNK_SIZE;
+        ChunkTagCache cache = new ChunkTagCache(ChunkTagCache.DEFAULT_MAX_BYTES);
+        CountingReader reader = new CountingReader(table(chunks));
+        byte[] id = randomByteArrayOfLength(16);
+        cache.getTags(id, dataLength, PAGE - 1, 2, reader);
+        assertEquals(2, reader.reads.size());
+
+        cache.invalidate(id, dataLength, PAGE + 5);
+        cache.getTags(id, dataLength, PAGE - 1, 2, reader);
+        assertEquals("only the invalidated page is read again", 3, reader.reads.size());
+        assertEquals((long) PAGE * TAG, reader.reads.get(2)[0]);
+    }
 }

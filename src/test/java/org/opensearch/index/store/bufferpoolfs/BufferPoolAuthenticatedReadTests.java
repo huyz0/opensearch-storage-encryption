@@ -7,6 +7,7 @@ package org.opensearch.index.store.bufferpoolfs;
 import static org.opensearch.index.store.CryptoDirectoryFactory.DEFAULT_CRYPTO_PROVIDER;
 
 import java.io.IOException;
+import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -15,6 +16,9 @@ import java.nio.file.StandardOpenOption;
 import java.security.Provider;
 import java.security.Security;
 import java.util.Arrays;
+import java.util.Random;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.store.FSDirectory;
@@ -234,6 +238,118 @@ public class BufferPoolAuthenticatedReadTests extends OpenSearchTestCase {
                 blocks[0].close();
             }
             assertEquals("all of this file's tags fit in one page", 1, tagCache.estimatedSize());
+        }
+    }
+
+    public void testTruncationIsDetectedAfterTagsAreCached() throws Exception {
+        byte[] data = randomByteArrayOfLength(3 * CHUNK + 10);
+        write("_9.tim", data);
+        Path file = path.resolve("_9.tim");
+        loadAndCheck(file, 0, 1, data);
+        try (FileChannel ch = FileChannel.open(file, StandardOpenOption.WRITE)) {
+            // Either cut into the footer, or cut the ciphertext of the last chunk.
+            ch.truncate(randomBoolean() ? ch.size() - randomIntBetween(1, 100) : 2L * CHUNK + 5);
+        }
+        expectThrows(CorruptIndexException.class, () -> loader.load(file, 0, 1, 1000));
+        expectThrows(CorruptIndexException.class, () -> loader.load(file, 2L * CHUNK, 1, 1000));
+    }
+
+    public void testLoadsAcrossTagPageBoundaries() throws Exception {
+        int page = ChunkTagCache.TAGS_PER_PAGE;
+        int chunks = randomFrom(page, page + 1, 2 * page);
+        int length = chunks * CHUNK - (randomBoolean() ? 0 : CHUNK - randomIntBetween(1, CHUNK - 1));
+        byte[] data = randomByteArrayOfLength(length);
+        write("_10.tim", data);
+        Path file = path.resolve("_10.tim");
+        long n = ChunkCipher.chunkCount(length);
+        loadAndCheck(file, page - 2, 4, data); // spans a page boundary
+        loadAndCheck(file, n - 1, 1, data); // last chunk
+        loadAndCheck(file, Math.max(0, n - 3), 8, data); // runs past the end
+        loadAndCheck(file, 0, 1, data);
+    }
+
+    public void testRewriteUnderSameNameUsesNewTags() throws Exception {
+        byte[] a = randomByteArrayOfLength(2 * CHUNK + 3);
+        write("_11.tim", a);
+        Path file = path.resolve("_11.tim");
+        loadAndCheck(file, 0, 2, a);
+        directory.deleteFile("_11.tim");
+        byte[] b = randomByteArrayOfLength(2 * CHUNK + 3);
+        write("_11.tim", b);
+        loadAndCheck(file, 0, 2, b);
+    }
+
+    public void testConcurrentLoadsShareTagPages() throws Exception {
+        int page = ChunkTagCache.TAGS_PER_PAGE;
+        byte[] data = randomByteArrayOfLength(3 * page * CHUNK + 77);
+        write("_12.tim", data);
+        Path file = path.resolve("_12.tim");
+        long n = ChunkCipher.chunkCount(data.length);
+        int threads = 8;
+        CyclicBarrier barrier = new CyclicBarrier(threads);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread[] workers = new Thread[threads];
+        for (int t = 0; t < threads; t++) {
+            Random random = new Random(random().nextLong());
+            workers[t] = new Thread(() -> {
+                try {
+                    barrier.await();
+                    for (int i = 0; i < 300; i++) {
+                        loadAndCheck(file, (long) (random.nextDouble() * n), 1 + random.nextInt(4), data);
+                    }
+                } catch (Throwable e) {
+                    failure.compareAndSet(null, e);
+                }
+            });
+            workers[t].start();
+        }
+        for (Thread worker : workers) {
+            worker.join();
+        }
+        if (failure.get() != null) {
+            throw new AssertionError(failure.get());
+        }
+        assertTrue(tagCache.estimatedSize() <= 4);
+    }
+
+    public void testFailedTagPageIsNotRemembered() throws Exception {
+        byte[] data = randomByteArrayOfLength(3 * CHUNK + 100);
+        write("_13.tim", data);
+        Path file = path.resolve("_13.tim");
+        long tagPosition = data.length + ChunkCipher.TAG_LENGTH; // chunk 1's tag
+        ByteBuffer original = ByteBuffer.allocate(1);
+        try (FileChannel ch = FileChannel.open(file, StandardOpenOption.READ)) {
+            ch.read(original, tagPosition);
+        }
+        flipBit("_13.tim", tagPosition);
+        expectThrows(CorruptIndexException.class, () -> loader.load(file, CHUNK, 1, 1000));
+        try (FileChannel ch = FileChannel.open(file, StandardOpenOption.WRITE)) {
+            ch.write(original.flip(), tagPosition);
+            ch.force(true);
+        }
+        // Once the disk is good again, the chunk loads: the bad page was not kept.
+        loadAndCheck(file, 1, 1, data);
+    }
+
+    private void loadAndCheck(Path file, long chunk, int count, byte[] data) throws Exception {
+        RefCountedMemorySegment[] blocks = loader.load(file, chunk * CHUNK, count, 1000);
+        try {
+            for (int i = 0; i < count; i++) {
+                if (blocks[i] == null) {
+                    continue;
+                }
+                int length = ChunkCipher.chunkLength(chunk + i, data.length);
+                byte[] actual = new byte[length];
+                MemorySegment.copy(blocks[i].segment(), ValueLayout.JAVA_BYTE, 0, actual, 0, length);
+                int offset = (int) ((chunk + i) * CHUNK);
+                assertArrayEquals(Arrays.copyOfRange(data, offset, offset + length), actual);
+            }
+        } finally {
+            for (RefCountedMemorySegment block : blocks) {
+                if (block != null) {
+                    block.close();
+                }
+            }
         }
     }
 
