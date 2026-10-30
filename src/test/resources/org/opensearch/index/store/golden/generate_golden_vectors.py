@@ -4,7 +4,7 @@
 """
 Independent reference implementation of the OSEF v2 on-disk format, used to
 generate the known-answer vectors in HkdfKeyDerivationKnownAnswerTests,
-FrameIvKnownAnswerTests, ChunkCipherKnownAnswerTests and
+ChunkCipherKnownAnswerTests and
 EncryptionFooterKnownAnswerTests, and the
 committed golden file golden-v2.osef.
 
@@ -52,18 +52,14 @@ def file_key(master_key, message_id):
 
 
 def frame_base_iv(master_key, message_id, frame_number):
-    # Frame IVs are derived from the master (directory) key, not the file key.
+    # HKDF with a "frame-N" context. No longer used by the file format; kept as an
+    # extra HKDF vector for HkdfKeyDerivationKnownAnswerTests.
     return hkdf_sha384(master_key, message_id, b"frame-%d" % frame_number, 16)
 
 
 def translog_base_iv(master_key, translog_uuid):
     padded = translog_uuid.encode("utf-8")[:16].ljust(16, b"\x00")
     return hkdf_sha384(master_key, padded, b"translog-base-iv", 16)
-
-
-def frame_iv(base_iv, offset_within_frame):
-    # CTR counter block: GCM nonce (12 bytes) || big-endian block counter + 2.
-    return base_iv[:12] + struct.pack(">I", (offset_within_frame >> 4) + 2)
 
 
 CHUNK_SIZE = 1 << 13  # ChunkCipher.CHUNK_SIZE
@@ -110,8 +106,6 @@ def main():
     print("fileKey            ", fk.hex())
     print("frameBaseIV(0)     ", iv0.hex())
     print("frameBaseIV(1)     ", iv1.hex())
-    print("frameIV(0, 0)      ", frame_iv(iv0, 0).hex())
-    print("frameIV(1, 4097)   ", frame_iv(iv1, 4097).hex())
     print("hkdf(49, ctx)      ", hkdf_sha384(MASTER_KEY, MESSAGE_ID, b"known-answer-test", 49).hex())
     print("translogIV(short)  ", translog_base_iv(MASTER_KEY, "short-uuid").hex())
     print("translogIV(long)   ", translog_base_iv(MASTER_KEY, "8rKGBKWtR9S2bIZ_hXlTQw-trailing").hex())
