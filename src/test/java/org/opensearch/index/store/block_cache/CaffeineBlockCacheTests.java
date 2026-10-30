@@ -191,9 +191,29 @@ public class CaffeineBlockCacheTests extends OpenSearchTestCase {
 
         when(mockLoader.load(key)).thenThrow(new BlockLoader.PoolAcquireFailedException("Acquire timeout")).thenReturn(value);
         when(mockLoader.reservePoolSegment(anyLong())).thenReturn(true);
+        when(mockLoader.poolExhausted()).thenReturn(true);
 
         assertSame(value, blockCache.getOrLoad(key));
         assertNull("coldest entry should be evicted to free pool space", blockCache.get(cold));
+        verify(mockLoader, times(2)).load(key);
+    }
+
+    /**
+     * A load also fails when it only queued behind other waiters while segments were free. Evicting
+     * then would free nothing that is needed, so the miss just waits its turn.
+     */
+    public void testGetOrLoadDoesNotEvictWhenPoolHasFreeSegments() throws Exception {
+        BlockCacheKey cold = new FileBlockCacheKey(Paths.get("/test/file.dat"), 0L);
+        BlockCacheKey key = new FileBlockCacheKey(Paths.get("/test/file.dat"), 8192L);
+        BlockCacheValue<String> value = createMockValue("loaded");
+        blockCache.put(cold, createMockValue("cold"));
+
+        when(mockLoader.load(key)).thenThrow(new BlockLoader.PoolAcquireFailedException("Acquire timeout")).thenReturn(value);
+        when(mockLoader.reservePoolSegment(anyLong())).thenReturn(true);
+        when(mockLoader.poolExhausted()).thenReturn(false);
+
+        assertSame(value, blockCache.getOrLoad(key));
+        assertNotNull("nothing should be evicted while the pool has free segments", blockCache.get(cold));
         verify(mockLoader, times(2)).load(key);
     }
 

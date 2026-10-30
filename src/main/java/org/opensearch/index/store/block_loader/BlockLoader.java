@@ -147,6 +147,14 @@ public interface BlockLoader<T> {
     default void releasePoolReservation() {}
 
     /**
+     * Returns true if the pool has no free segment and cannot allocate one. A load can fail while
+     * segments are free, because it queues behind other waiters, and evicting then frees nothing needed.
+     */
+    default boolean poolExhausted() {
+        return true;
+    }
+
+    /**
      * Loads a single block using the provided cache key. Waits at most
      * {@link #CACHE_LOAD_POOL_TIMEOUT_MS} for a pool segment.
      *

@@ -653,6 +653,57 @@ public class MemorySegmentPoolTests extends OpenSearchTestCase {
         assertEquals(1024, pool.availableMemoryAccurate());
     }
 
+    /** A queued caller must not be starved by newcomers that keep polling with a zero timeout. */
+    public void testQueuedWaiterIsNotStarvedByPollingNewcomers() throws Exception {
+        pool = new MemorySegmentPool(1024, 1024);
+        java.util.concurrent.atomic.AtomicBoolean stop = new java.util.concurrent.atomic.AtomicBoolean();
+        Thread[] churn = new Thread[8];
+        for (int i = 0; i < churn.length; i++) {
+            churn[i] = new Thread(() -> {
+                while (!stop.get()) {
+                    try {
+                        RefCountedMemorySegment s = pool.tryAcquire(0, java.util.concurrent.TimeUnit.MILLISECONDS);
+                        java.util.concurrent.locks.LockSupport.parkNanos(200_000);
+                        s.decRef();
+                    } catch (Exception e) {
+                        Thread.onSpinWait();
+                    }
+                }
+            });
+            churn[i].start();
+        }
+        try {
+            for (int round = 0; round < 20; round++) {
+                // Each newcomer holds a segment for ~0.2 ms, so a fair queue serves this caller well within 1 s
+                pool.tryAcquire(1, java.util.concurrent.TimeUnit.SECONDS).decRef();
+            }
+        } finally {
+            stop.set(true);
+            for (Thread t : churn) {
+                t.join();
+            }
+        }
+    }
+
+    /** releaseAll frees several segments at once; every queued caller must be woken, not just the first. */
+    public void testReleaseAllServesEveryQueuedWaiter() throws Exception {
+        pool = new MemorySegmentPool(2 * 1024, 1024);
+        RefCountedMemorySegment a = pool.acquire();
+        RefCountedMemorySegment b = pool.acquire();
+        java.util.concurrent.CompletableFuture<RefCountedMemorySegment> first = waitInBackground();
+        assertBusy(() -> assertEquals(1, pool.waiterCount()));
+        java.util.concurrent.CompletableFuture<RefCountedMemorySegment> second = waitInBackground();
+        assertBusy(() -> assertEquals(2, pool.waiterCount()));
+
+        pool.releaseAll(a, b);
+        // Hold both before releasing either: a release would wake the second waiter on its own.
+        // Waiters wait up to 10 s, so the 2 s bound fails unless the first passes its turn on.
+        RefCountedMemorySegment gotFirst = first.get(2, java.util.concurrent.TimeUnit.SECONDS);
+        RefCountedMemorySegment gotSecond = second.get(2, java.util.concurrent.TimeUnit.SECONDS);
+        gotFirst.decRef();
+        gotSecond.decRef();
+    }
+
     private java.util.concurrent.CompletableFuture<RefCountedMemorySegment> waitInBackground() {
         java.util.concurrent.CompletableFuture<RefCountedMemorySegment> result = new java.util.concurrent.CompletableFuture<>();
         Thread t = new Thread(() -> {

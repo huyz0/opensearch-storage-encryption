@@ -110,7 +110,10 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
                 // Unused if another thread cached the block while we waited; hand it to the next waiter
                 blockLoader.releasePoolReservation();
             }
-            relievePoolPressure();
+            if (blockLoader.poolExhausted()) {
+                // Otherwise the load failed only because it queued behind other waiters for free segments
+                relievePoolPressure();
+            }
             long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
             boolean reserved;
             try {

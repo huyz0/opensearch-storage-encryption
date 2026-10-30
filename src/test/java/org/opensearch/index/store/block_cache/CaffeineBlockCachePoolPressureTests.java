@@ -88,6 +88,11 @@ public class CaffeineBlockCachePoolPressureTests extends OpenSearchTestCase {
         public void releasePoolReservation() {
             pool.releaseReservation();
         }
+
+        @Override
+        public boolean poolExhausted() {
+            return pool.availableMemoryAccurate() < SEGMENT_SIZE;
+        }
     }
 
     private static BlockCacheKey key(int block) {

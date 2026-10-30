@@ -241,6 +241,11 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         segmentPool.releaseReservation();
     }
 
+    @Override
+    public boolean poolExhausted() {
+        return segmentPool.availableMemory() < segmentPool.pooledSegmentSize();
+    }
+
     private void releaseHandles(RefCountedMemorySegment[] handles, int from, int to) {
         for (int i = from; i < to; i++) {
             if (handles[i] != null) {
