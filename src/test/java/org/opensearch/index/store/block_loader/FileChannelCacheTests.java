@@ -6,6 +6,7 @@ package org.opensearch.index.store.block_loader;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.ClosedByInterruptException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -962,5 +963,64 @@ public class FileChannelCacheTests extends OpenSearchTestCase {
         assertFalse("FileChannel 2 must be closed after prefix invalidation (FD leak)", fc2.isOpen());
 
         cache.close();
+    }
+
+    // ====================================================================
+    // Channel closed by a thread interrupt (H6)
+    // ====================================================================
+
+    /**
+     * FileChannel is interruptible: a thread interrupted while reading closes the channel for every
+     * thread that shares it. The cache must not keep handing out that dead channel.
+     */
+    public void testAcquireReplacesChannelClosedByInterrupt() throws Exception {
+        Path file = createTestFile();
+        String path = file.toAbsolutePath().normalize().toString();
+        FileChannelCache cache = new FileChannelCache(16, null);
+
+        FileChannel interrupted;
+        try (RefCountedChannel ref = cache.acquire(path)) {
+            interrupted = ref.channel();
+            Thread.currentThread().interrupt();
+            try {
+                expectThrows(ClosedByInterruptException.class, () -> interrupted.read(ByteBuffer.allocate(64), 0));
+            } finally {
+                assertTrue("interrupt flag should still be set", Thread.interrupted());
+            }
+        }
+        assertFalse(interrupted.isOpen());
+
+        try (RefCountedChannel ref = cache.acquire(path)) {
+            assertNotSame("a closed channel must not be served from the cache", interrupted, ref.channel());
+            assertTrue(ref.channel().isOpen());
+            assertTrue(readAndValidate(ref.channel(), MAGIC));
+        }
+        assertEquals(1, cache.estimatedSize());
+        cache.close();
+    }
+
+    /**
+     * A reader still holding a reference to the dead channel must not break the replacement:
+     * both the old and the new entries are released exactly once.
+     */
+    public void testReplacementOfClosedChannelWhileOldRefHeld() throws Exception {
+        Path file = createTestFile();
+        String path = file.toAbsolutePath().normalize().toString();
+        FileChannelCache cache = new FileChannelCache(16, null);
+
+        RefCountedChannel stale = cache.acquire(path);
+        stale.channel().close(); // what an interrupt does to the shared channel
+
+        FileChannel fresh;
+        try (RefCountedChannel ref = cache.acquire(path)) {
+            fresh = ref.channel();
+            assertNotSame(stale.channel(), fresh);
+            assertTrue(readAndValidate(fresh, MAGIC));
+        }
+        stale.close();
+        assertFalse("stale ref fully released", stale.isAlive());
+
+        cache.close();
+        assertFalse("replacement channel closed with the cache", fresh.isOpen());
     }
 }
