@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Independent reference implementation of the OSEF v1 on-disk format, used to
-generate the known-answer vectors in EncryptionKnownAnswerTests and the
+generate the known-answer vectors in HkdfKeyDerivationKnownAnswerTests,
+FrameIvKnownAnswerTests and EncryptionFooterKnownAnswerTests, and the
 committed golden file golden-v1.osef.
 
 It deliberately shares no code with the plugin: HKDF is written out from
