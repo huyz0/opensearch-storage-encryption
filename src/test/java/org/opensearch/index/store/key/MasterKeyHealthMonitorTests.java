@@ -196,7 +196,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
 
         ConcurrentHashMap<String, FailureState> tracker = getFailureTracker();
         FailureState state = tracker.get(TEST_INDEX_UUID);
-        
+
         // Verify transient state initially
         assertEquals("Failure type should be TRANSIENT", FailureType.TRANSIENT, state.failureType);
         assertFalse("Blocks should not be applied for transient error", state.blocksApplied);
@@ -323,10 +323,10 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
 
         // Act: Report multiple critical failures
         monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, criticalError, FailureType.CRITICAL);
-        
+
         ConcurrentHashMap<String, FailureState> tracker = getFailureTracker();
         FailureState state = tracker.get(TEST_INDEX_UUID);
-        
+
         // Verify blocksApplied is true after first failure
         assertTrue("Blocks should be applied after first critical failure", state.blocksApplied);
 
@@ -449,14 +449,12 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
             "DisabledException: Key is disabled",
             "AccessDeniedException: Access denied",
             "NotFoundException: Key not found",
-            "access denied to resource"
-        };
+            "access denied to resource" };
 
         for (String pattern : criticalPatterns) {
             Exception criticalError = new RuntimeException(pattern);
             FailureType type = KeyCacheException.classify(criticalError);
-            assertEquals("Pattern '" + pattern + "' should be classified as CRITICAL", 
-                FailureType.CRITICAL, type);
+            assertEquals("Pattern '" + pattern + "' should be classified as CRITICAL", FailureType.CRITICAL, type);
         }
     }
 
