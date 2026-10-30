@@ -168,8 +168,31 @@ public class CaffeineBlockCacheTests extends OpenSearchTestCase {
         BlockCacheKey key = new FileBlockCacheKey(Paths.get("/test/file.dat"), 0L);
 
         when(mockLoader.load(key)).thenThrow(new BlockLoader.PoolAcquireFailedException("Acquire timeout"));
+        CaffeineBlockCache<String, BlockCacheValue<String>> shortBudget = new CaffeineBlockCache<>(
+            caffeineCache,
+            mockLoader,
+            MAX_BLOCKS,
+            50
+        );
 
-        expectThrows(Exception.class, () -> blockCache.getOrLoad(key));
+        expectThrows(Exception.class, () -> shortBudget.getOrLoad(key));
+        verify(mockLoader, org.mockito.Mockito.atLeast(2)).load(key);
+    }
+
+    /**
+     * A pool-acquire failure is retried outside the cache's lock after evicting the coldest entries.
+     */
+    public void testGetOrLoadRetriesPoolAcquireFailureAfterEvictingColdEntries() throws Exception {
+        BlockCacheKey cold = new FileBlockCacheKey(Paths.get("/test/file.dat"), 0L);
+        BlockCacheKey key = new FileBlockCacheKey(Paths.get("/test/file.dat"), 8192L);
+        BlockCacheValue<String> value = createMockValue("loaded");
+        blockCache.put(cold, createMockValue("cold"));
+
+        when(mockLoader.load(key)).thenThrow(new BlockLoader.PoolAcquireFailedException("Acquire timeout")).thenReturn(value);
+
+        assertSame(value, blockCache.getOrLoad(key));
+        assertNull("coldest entry should be evicted to free pool space", blockCache.get(cold));
+        verify(mockLoader, times(2)).load(key);
     }
 
     /**

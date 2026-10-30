@@ -144,8 +144,9 @@ public class MemorySegmentPool implements Pool<RefCountedMemorySegment>, AutoClo
                 // Pool exhausted - wait with timeout for a segment to be released
                 long remainingNanos = deadlineNanos - System.nanoTime();
                 if (remainingNanos <= 0) {
+                    // debug, not warn: callers such as the block cache retry short timeouts and log if they give up
                     LOGGER
-                        .warn(
+                        .debug(
                             "Pool acquisition timed out after {}ms (allocated={}, max={})",
                             unit.toMillis(timeout),
                             allocatedSegments,

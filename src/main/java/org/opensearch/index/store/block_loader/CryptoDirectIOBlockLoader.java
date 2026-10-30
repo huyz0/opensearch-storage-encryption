@@ -96,6 +96,11 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         long readLength = blockCount << CACHE_BLOCK_SIZE_POWER;
         String normalizedPath = filePath.toAbsolutePath().normalize().toString();
 
+        // Take the pool segments before any I/O. Under pool pressure the block cache retries this load,
+        // and failing here keeps each retry from re-reading and re-decrypting the block.
+        acquireSegments(result, poolTimeoutMs);
+        boolean success = false;
+
         try (Arena arena = Arena.ofConfined(); RefCountedChannel ref = fileChannelCache.acquire(normalizedPath)) {
             MemorySegment readBytes = directIOReadAligned(ref.channel(), filePath, startOffset, readLength, arena);
             long bytesRead = readBytes.byteSize();
@@ -130,44 +135,58 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
 
             int blockIndex = 0;
             long bytesCopied = 0;
-
-            try {
-                while (blockIndex < blockCount && bytesCopied < bytesRead) {
-                    RefCountedMemorySegment handle = segmentPool.tryAcquire(poolTimeoutMs, TimeUnit.MILLISECONDS);
-                    MemorySegment pooled = handle.segment();
-
-                    int remaining = (int) (bytesRead - bytesCopied);
-                    int toCopy = Math.min(CACHE_BLOCK_SIZE, remaining);
-
-                    if (toCopy > 0) {
-                        MemorySegment.copy(readBytes, bytesCopied, pooled, 0, toCopy);
-                    }
-
-                    result[blockIndex++] = handle;
-                    bytesCopied += toCopy;
-                }
-            } catch (InterruptedException e) {
-                releaseHandles(result, blockIndex);
-                Thread.currentThread().interrupt();
-                throw new IOException("Interrupted while acquiring pool segment", e);
-            } catch (IOException e) {
-                releaseHandles(result, blockIndex);
-                throw e;
+            while (blockIndex < blockCount && bytesCopied < bytesRead) {
+                int toCopy = (int) Math.min(CACHE_BLOCK_SIZE, bytesRead - bytesCopied);
+                MemorySegment.copy(readBytes, bytesCopied, result[blockIndex].segment(), 0, toCopy);
+                blockIndex++;
+                bytesCopied += toCopy;
             }
+            // Short read at EOF: hand back the segments that got no data
+            releaseHandles(result, blockIndex, result.length);
 
+            success = true;
             return result;
         } catch (NoSuchFileException e) {
             throw e;
         } catch (Exception e) {
             LOGGER.error("Bulk read failed: path={} offset={} length={} err={}", filePath, startOffset, readLength, e.toString());
             throw e;
+        } finally {
+            if (!success) {
+                releaseHandles(result, 0, result.length);
+            }
         }
     }
 
-    private void releaseHandles(RefCountedMemorySegment[] handles, int upTo) {
-        for (int i = 0; i < upTo; i++) {
+    /**
+     * Fills {@code into} from the pool, or releases what it took and throws. A pool timeout is reported as
+     * {@link PoolAcquireFailedException} so the block cache can free space and retry.
+     */
+    private void acquireSegments(RefCountedMemorySegment[] into, long poolTimeoutMs) throws Exception {
+        int acquired = 0;
+        try {
+            for (; acquired < into.length; acquired++) {
+                into[acquired] = segmentPool.tryAcquire(poolTimeoutMs, TimeUnit.MILLISECONDS);
+            }
+        } catch (InterruptedException e) {
+            releaseHandles(into, 0, acquired);
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while acquiring pool segment", e);
+        } catch (IOException e) {
+            releaseHandles(into, 0, acquired);
+            // The pool reports a timeout as a plain IOException
+            throw new PoolAcquireFailedException(e.getMessage(), e);
+        } catch (Exception e) {
+            releaseHandles(into, 0, acquired);
+            throw e;
+        }
+    }
+
+    private void releaseHandles(RefCountedMemorySegment[] handles, int from, int to) {
+        for (int i = from; i < to; i++) {
             if (handles[i] != null) {
                 handles[i].close();
+                handles[i] = null;
             }
         }
     }

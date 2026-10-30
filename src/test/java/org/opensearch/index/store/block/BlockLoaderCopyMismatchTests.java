@@ -593,6 +593,32 @@ public class BlockLoaderCopyMismatchTests extends OpenSearchTestCase {
 
     private static final ValueLayout.OfByte LAYOUT_BYTE = ValueLayout.JAVA_BYTE;
 
+    /**
+     * A pool timeout must surface as {@link BlockLoader.PoolAcquireFailedException} (the block cache
+     * retries on that type) and must happen before any disk read, so retries do not repeat I/O.
+     */
+    public void testPoolTimeoutIsReportedAsPoolAcquireFailedBeforeAnyRead() throws Exception {
+        writeFile("pool_timeout", buildDeterministicPattern(CACHE_BLOCK_SIZE));
+        Path filePath = bufferPoolDirectory.getDirectory().resolve("pool_timeout");
+
+        @SuppressWarnings("unchecked")
+        Pool<RefCountedMemorySegment> exhausted = org.mockito.Mockito.mock(Pool.class);
+        org.mockito.Mockito
+            .when(exhausted.tryAcquire(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any()))
+            .thenThrow(new IOException("Pool acquisition timed out"));
+        org.opensearch.index.store.block_loader.FileChannelCache channels = org.mockito.Mockito
+            .mock(org.opensearch.index.store.block_loader.FileChannelCache.class);
+
+        BlockLoader<RefCountedMemorySegment> loader = new CryptoDirectIOBlockLoader(
+            exhausted,
+            keyResolver,
+            encryptionMetadataCache,
+            channels
+        );
+        expectThrows(BlockLoader.PoolAcquireFailedException.class, () -> loader.load(filePath, 0, 1, 5));
+        org.mockito.Mockito.verifyNoInteractions(channels);
+    }
+
     private void writeFile(String name, byte[] data) throws IOException {
         try (IndexOutput output = bufferPoolDirectory.createOutput(name, IOContext.DEFAULT)) {
             output.writeBytes(data, data.length);
