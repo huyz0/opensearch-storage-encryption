@@ -4,8 +4,6 @@
  */
 package org.opensearch.index.store.niofs;
 
-import static org.opensearch.index.store.cipher.AesCipherFactory.ALGORITHM;
-
 import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -87,7 +85,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         if (fc.size() != expectedSize) {
             throw new CorruptIndexException("encrypted file size " + fc.size() + " does not match its footer (" + expectedSize + ")", this);
         }
-        this.keySpec = new SecretKeySpec(metadata.getFileKey(), ALGORITHM);
+        this.keySpec = new SecretKeySpec(metadata.getFileKey(), "AES");
         this.off = 0L;
         this.end = dataLength;
     }
