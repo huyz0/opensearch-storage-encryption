@@ -159,6 +159,18 @@ public class CryptoNIOFSAuthenticatedReadTests extends OpenSearchTestCase {
         }
     }
 
+    public void testBadKeyMetadataLengthIsCorruptionNotACrash() throws IOException {
+        write(FILE, randomByteArrayOfLength(100));
+        long size = Files.size(dir.resolve(FILE));
+        // KeyMetadataLength sits 12 bytes before the end: [KeyMetadataLength 2][AlgorithmId 2][FooterLength 4][Magic 4]
+        try (FileChannel ch = FileChannel.open(dir.resolve(FILE), StandardOpenOption.WRITE)) {
+            ch.write(ByteBuffer.wrap(new byte[] { (byte) (randomBoolean() ? 0x7f : 0xff), (byte) 0xff }), size - 12);
+        }
+        try (Directory d = openDirectory()) {
+            expectThrows(CorruptIndexException.class, () -> d.openInput(FILE, IOContext.DEFAULT));
+        }
+    }
+
     public void testWrongMasterKeyIsRejected() throws IOException {
         write(FILE, randomByteArrayOfLength(100));
         byte[] otherKey = masterKey.clone();

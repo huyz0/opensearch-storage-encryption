@@ -175,6 +175,44 @@ public class BufferPoolAuthenticatedReadTests extends OpenSearchTestCase {
         assertChunkCorrupt("_3.tim", chunk, data);
     }
 
+    public void testZeroLengthFile() throws IOException {
+        write("_4.tim", new byte[0]);
+        try (IndexInput in = directory.openInput("_4.tim", IOContext.DEFAULT)) {
+            assertEquals(0, in.length());
+            expectThrows(java.io.EOFException.class, in::readByte);
+        }
+    }
+
+    public void testSwappedChunksAreDetected() throws Exception {
+        byte[] data = randomByteArrayOfLength(2 * CHUNK + 10);
+        write("_5.tim", data);
+        // Swap chunks 0 and 1 together with their tags: each is still a validly sealed chunk.
+        swap("_5.tim", 0, CHUNK, CHUNK);
+        swap("_5.tim", data.length, data.length + ChunkCipher.TAG_LENGTH, ChunkCipher.TAG_LENGTH);
+        Path file = path.resolve("_5.tim");
+        expectThrows(CorruptIndexException.class, () -> loader.load(file, 0, 1, 1000));
+        expectThrows(CorruptIndexException.class, () -> loader.load(file, CHUNK, 1, 1000));
+    }
+
+    public void testTruncationIsDetected() throws Exception {
+        write("_6.tim", randomByteArrayOfLength(2 * CHUNK + 10));
+        // The writer cached the footer; the size check must still catch the cut.
+        try (FileChannel ch = FileChannel.open(path.resolve("_6.tim"), StandardOpenOption.WRITE)) {
+            ch.truncate(ch.size() - randomIntBetween(1, 100));
+        }
+        expectThrows(CorruptIndexException.class, () -> loader.load(path.resolve("_6.tim"), 0, 1, 1000));
+    }
+
+    public void testTamperedFooterIsDetected() throws Exception {
+        write("_7.tim", randomByteArrayOfLength(CHUNK + 10));
+        Path file = path.resolve("_7.tim");
+        long size = java.nio.file.Files.size(file);
+        // Flip a bit in the authenticated part of the footer (DataLength..Magic, after the auth tag).
+        flipBit("_7.tim", size - randomIntBetween(1, 40));
+        encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(file));
+        expectThrows(IOException.class, () -> loader.load(file, 0, 1, 1000));
+    }
+
     private void assertChunkCorrupt(String name, int chunk, byte[] data) throws Exception {
         try (IndexInput in = directory.openInput(name, IOContext.DEFAULT)) {
             in.seek((long) chunk * CHUNK);
@@ -200,6 +238,17 @@ public class BufferPoolAuthenticatedReadTests extends OpenSearchTestCase {
                 out.writeBytes(data, pos, n);
                 pos += n;
             }
+        }
+    }
+
+    private void swap(String name, long a, long b, int length) throws IOException {
+        try (FileChannel ch = FileChannel.open(path.resolve(name), StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+            ByteBuffer x = ByteBuffer.allocate(length);
+            ByteBuffer y = ByteBuffer.allocate(length);
+            ch.read(x, a);
+            ch.read(y, b);
+            ch.write(y.flip(), a);
+            ch.write(x.flip(), b);
         }
     }
 

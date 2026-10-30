@@ -164,6 +164,7 @@ public class EncryptionFooter {
         // Read KeyMetadataLength
         pos -= EncryptionMetadataTrailer.KEY_METADATA_LENGTH_SIZE;
         short keyMetadataLength = ByteBuffer.wrap(footerData, pos, EncryptionMetadataTrailer.KEY_METADATA_LENGTH_SIZE).getShort();
+        checkKeyMetadataLength(keyMetadataLength, fileBytes.length);
 
         // Read KeyMetadata (currently empty)
         pos -= keyMetadataLength;
@@ -395,6 +396,7 @@ public class EncryptionFooter {
         short keyMetadataLength = ByteBuffer
             .wrap(footerData, keyMetadataLengthPos, EncryptionMetadataTrailer.KEY_METADATA_LENGTH_SIZE)
             .getShort();
+        checkKeyMetadataLength(keyMetadataLength, footerBytes.length);
 
         // MessageId is before KeyMetadata
         int messageIdPos = footerData.length - EncryptionMetadataTrailer.MAGIC.length - EncryptionMetadataTrailer.FOOTER_LENGTH_SIZE
@@ -402,6 +404,16 @@ public class EncryptionFooter {
             - EncryptionMetadataTrailer.MESSAGE_ID_SIZE;
 
         return Arrays.copyOfRange(footerData, messageIdPos, messageIdPos + EncryptionMetadataTrailer.MESSAGE_ID_SIZE);
+    }
+
+    /** Rejects a KeyMetadataLength that doesn't fit the footer, before it is used as an offset. */
+    private static void checkKeyMetadataLength(short keyMetadataLength, int footerLength) throws CorruptIndexException {
+        if (keyMetadataLength < 0 || EncryptionMetadataTrailer.calculateFooterSize(keyMetadataLength) != footerLength) {
+            throw new CorruptIndexException(
+                "Invalid key metadata length " + keyMetadataLength + " for footer of length " + footerLength,
+                "encryption footer"
+            );
+        }
     }
 
     /**
