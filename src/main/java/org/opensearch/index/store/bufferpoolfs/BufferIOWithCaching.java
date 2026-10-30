@@ -290,6 +290,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
         @SuppressWarnings("ConvertToTryWithResources")
         public void close() throws IOException {
             IOException exception = null;
+            boolean success = false;
 
             try {
                 checkClosed();
@@ -329,11 +330,11 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                     // returning, preserving the durability contract.
                     Thread.startVirtualThread(() -> PanamaNativeAccess.dropFileCache(absolutePath));
                 }
-
+                success = true;
             } catch (IOException e) {
                 exception = e;
             } finally {
-                if (exception != null) {
+                if (success == false) {
                     // Don't leak the file handle when encryption or the footer write failed
                     IOUtils.closeWhileHandlingException(out);
                 }

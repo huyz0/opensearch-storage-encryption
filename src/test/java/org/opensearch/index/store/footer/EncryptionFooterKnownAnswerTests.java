@@ -17,6 +17,7 @@ import java.util.HexFormat;
 
 import javax.crypto.spec.SecretKeySpec;
 
+import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.store.FSLockFactory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
@@ -110,8 +111,8 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
     public void testWrongKeyRejected() {
         byte[] wrongKey = FILE_KEY.clone();
         wrongKey[0] ^= 1;
-        IOException e = expectThrows(IOException.class, () -> EncryptionFooter.deserialize(GOLDEN_FOOTER, wrongKey));
-        assertEquals("Footer authentication failed", e.getMessage());
+        CorruptIndexException e = expectThrows(CorruptIndexException.class, () -> EncryptionFooter.deserialize(GOLDEN_FOOTER, wrongKey));
+        assertEquals("Footer authentication failed", e.getOriginalMessage());
     }
 
     public void testGoldenFileLayout() throws Exception {

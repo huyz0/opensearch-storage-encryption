@@ -73,6 +73,11 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         EncryptionFooter footer = EncryptionFooter.readViaFileChannel(normalizedFilePath, channel, masterKey, encryptionMetadataCache);
         var metadata = encryptionMetadataCache.getOrLoadMetadata(normalizedFilePath, footer, masterKey);
         this.dataLength = metadata.getFooter().getDataLength();
+        // The footer may come from the cache, so check the size here too: truncation is corruption.
+        long expectedSize = dataLength + metadata.getFooter().getTrailerLength();
+        if (fc.size() != expectedSize) {
+            throw new CorruptIndexException("encrypted file size " + fc.size() + " does not match its footer (" + expectedSize + ")", this);
+        }
         this.keySpec = new SecretKeySpec(metadata.getFileKey(), ALGORITHM);
         this.off = 0L;
         this.end = dataLength;

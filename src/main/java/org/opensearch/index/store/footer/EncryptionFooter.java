@@ -15,6 +15,7 @@ import javax.crypto.spec.SecretKeySpec;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.index.CorruptIndexException;
 import org.opensearch.index.store.cipher.ChunkCipher;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
@@ -140,7 +141,7 @@ public class EncryptionFooter {
 
         // Verify auth tag
         if (!verifyFooterAuthTag(fileKey, footerData, authTag)) {
-            throw new IOException("Footer authentication failed");
+            throw new CorruptIndexException("Footer authentication failed", "encryption footer");
         }
 
         int pos = footerData.length;
@@ -363,8 +364,9 @@ public class EncryptionFooter {
         // DataLength is authenticated, so this catches truncated or extended files
         long expectedFileSize = footer.getDataLength() + footer.getTrailerLength();
         if (fileSize != expectedFileSize) {
-            throw new IOException(
-                "Encrypted file size " + fileSize + " does not match its footer (expected " + expectedFileSize + "): " + normalizedFilePath
+            throw new CorruptIndexException(
+                "Encrypted file size " + fileSize + " does not match its footer (expected " + expectedFileSize + ")",
+                normalizedFilePath
             );
         }
         encryptionMetadataCache.getOrLoadMetadata(normalizedFilePath, footer, masterKey);

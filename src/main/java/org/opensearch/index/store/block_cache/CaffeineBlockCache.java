@@ -263,6 +263,9 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
 
             for (int i = 0; i < loadedBlocks.length; i++) {
                 V block = loadedBlocks[i];
+                if (block == null) {
+                    break; // the loader leaves blocks past the end of the file null
+                }
 
                 long blockOffset = startOffset + i * CACHE_BLOCK_SIZE;
                 BlockCacheKey key = createBlockKey(filePath, blockOffset);

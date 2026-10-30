@@ -141,8 +141,21 @@ public class CryptoNIOFSAuthenticatedReadTests extends OpenSearchTestCase {
         Files.write(dir.resolve(FILE), cut);
 
         try (Directory d = openDirectory()) {
-            IOException e = expectThrows(IOException.class, () -> d.openInput(FILE, IOContext.DEFAULT));
+            CorruptIndexException e = expectThrows(CorruptIndexException.class, () -> d.openInput(FILE, IOContext.DEFAULT));
             assertTrue(e.getMessage(), e.getMessage().contains("does not match its footer"));
+        }
+    }
+
+    public void testTruncationIsDetectedWhenFooterIsCached() throws IOException {
+        try (Directory d = openDirectory()) {
+            try (IndexOutput out = d.createOutput(FILE, IOContext.DEFAULT)) {
+                out.writeBytes(randomByteArrayOfLength(2 * CHUNK), 2 * CHUNK);
+            }
+            // The writer cached the footer; cut the file afterwards.
+            try (FileChannel ch = FileChannel.open(dir.resolve(FILE), StandardOpenOption.WRITE)) {
+                ch.truncate(ch.size() - randomIntBetween(1, 100));
+            }
+            expectThrows(CorruptIndexException.class, () -> d.openInput(FILE, IOContext.DEFAULT));
         }
     }
 
@@ -151,8 +164,8 @@ public class CryptoNIOFSAuthenticatedReadTests extends OpenSearchTestCase {
         byte[] otherKey = masterKey.clone();
         otherKey[0] ^= 1;
         try (Directory d = openDirectory(otherKey)) {
-            IOException e = expectThrows(IOException.class, () -> d.openInput(FILE, IOContext.DEFAULT));
-            assertEquals("Footer authentication failed", e.getMessage());
+            CorruptIndexException e = expectThrows(CorruptIndexException.class, () -> d.openInput(FILE, IOContext.DEFAULT));
+            assertEquals("Footer authentication failed", e.getOriginalMessage());
         }
     }
 
