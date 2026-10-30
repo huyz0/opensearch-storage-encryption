@@ -9,16 +9,19 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.junit.After;
 import org.junit.Before;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.opensearch.action.admin.indices.settings.put.UpdateSettingsRequest;
@@ -498,5 +501,83 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         FailureType type = KeyCacheException.classify(wrapped);
 
         assertEquals("Wrapped DisabledException should be classified as CRITICAL", FailureType.CRITICAL, type);
+    }
+
+    private List<UpdateSettingsRequest> capturedUpdateRequests() {
+        ArgumentCaptor<UpdateSettingsRequest> captor = ArgumentCaptor.forClass(UpdateSettingsRequest.class);
+        verify(mockIndicesAdminClient, atLeastOnce()).updateSettings(captor.capture());
+        return captor.getAllValues();
+    }
+
+    /**
+     * Recovery removes the write block this monitor applied, and nothing else
+     */
+    public void testSuccessRemovesOnlyBlocksItApplied() throws Exception {
+        when(mockIndexMetadata.getSettings()).thenReturn(Settings.EMPTY);
+
+        monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+        // The write block is now set on the index (read block is still in its grace period)
+        when(mockIndexMetadata.getSettings()).thenReturn(Settings.builder().put("index.blocks.write", true).build());
+
+        monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
+
+        List<UpdateSettingsRequest> requests = capturedUpdateRequests();
+        assertEquals(2, requests.size());
+        assertEquals("true", requests.get(0).settings().get("index.blocks.write"));
+        Settings removal = requests.get(1).settings();
+        assertTrue(removal.keySet().contains("index.blocks.write"));
+        assertNull(removal.get("index.blocks.write"));
+        assertFalse("Read block was never applied, so it must not be removed", removal.keySet().contains("index.blocks.read"));
+    }
+
+    /**
+     * A write block set by someone else (e.g. shrink, operator freeze) is never applied or removed by the monitor
+     */
+    public void testPreExistingWriteBlockIsLeftAlone() throws Exception {
+        // Shrink sets index.blocks.write=true on the source index before the KMS failure
+        when(mockIndexMetadata.getSettings()).thenReturn(Settings.builder().put("index.blocks.write", true).build());
+
+        monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+
+        FailureState state = getFailureTracker().get(TEST_INDEX_UUID);
+        assertTrue("Index is still protected", state.blocksApplied);
+        assertFalse("Monitor did not set the write block", state.appliedWriteBlock);
+
+        monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
+
+        verify(mockIndicesAdminClient, never()).updateSettings(any());
+    }
+
+    /**
+     * Success on a node that never applied blocks leaves existing blocks in place
+     */
+    public void testSuccessWithoutTrackedFailureKeepsExistingBlocks() throws Exception {
+        when(mockIndexMetadata.getSettings())
+            .thenReturn(Settings.builder().put("index.blocks.read", true).put("index.blocks.write", true).build());
+
+        monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
+
+        verify(mockIndicesAdminClient, never()).updateSettings(any());
+    }
+
+    /**
+     * If another node removes the write block while this node still can't load the key,
+     * the next critical failure on this node re-applies it and takes ownership
+     */
+    public void testCriticalFailureReassertsRemovedBlock() throws Exception {
+        // Another node already set the write block
+        when(mockIndexMetadata.getSettings()).thenReturn(Settings.builder().put("index.blocks.write", true).build());
+        monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+        FailureState state = getFailureTracker().get(TEST_INDEX_UUID);
+        assertFalse(state.appliedWriteBlock);
+
+        // That node recovers and removes its block; this node is still failing
+        when(mockIndexMetadata.getSettings()).thenReturn(Settings.EMPTY);
+        monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+
+        assertTrue("Block re-applied and now owned by this node", state.appliedWriteBlock);
+        List<UpdateSettingsRequest> requests = capturedUpdateRequests();
+        assertEquals(1, requests.size());
+        assertEquals("true", requests.get(0).settings().get("index.blocks.write"));
     }
 }
