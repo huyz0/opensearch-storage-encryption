@@ -365,4 +365,36 @@ public class CryptoFileChannelWrapperTests extends OpenSearchTestCase {
         expectThrows(IllegalArgumentException.class, () -> factory.open(path, StandardOpenOption.CREATE, StandardOpenOption.APPEND));
         assertFalse(Files.exists(path));
     }
+
+    public void testVersionOneFilesAreRejected() throws IOException {
+        Path path = createTempDir().resolve("translog-10.tlog");
+        int headerSize = writeTranslog(path, randomByteArrayOfLength(100));
+        try (FileChannel raw = FileChannel.open(path, StandardOpenOption.WRITE)) {
+            raw.write(ByteBuffer.allocate(Integer.BYTES).putInt(0x4F535431).flip(), headerSize); // "OST1"
+        }
+        try (CryptoFileChannelWrapper channel = open(path, StandardOpenOption.READ)) {
+            IOException e = expectThrows(IOException.class, () -> channel.read(ByteBuffer.allocate(16), headerSize));
+            assertTrue(e.getMessage(), e.getMessage().contains("Unsupported translog encryption format"));
+        }
+    }
+
+    public void testKeyFailureOnReadIsAnIOException() throws IOException {
+        Path path = createTempDir().resolve("translog-11.tlog");
+        int headerSize = writeTranslog(path, randomByteArrayOfLength(100));
+        KeyResolver failing = mock(KeyResolver.class);
+        when(failing.getDataKey()).thenThrow(new IllegalStateException("key unavailable"));
+        Set<OpenOption> options = Set.of(StandardOpenOption.READ);
+        try (
+            CryptoFileChannelWrapper channel = new CryptoFileChannelWrapper(
+                FileChannel.open(path, StandardOpenOption.READ),
+                failing,
+                path,
+                options,
+                UUID
+            )
+        ) {
+            IOException e = expectThrows(IOException.class, () -> channel.read(ByteBuffer.allocate(16), headerSize));
+            assertTrue(e.getCause() instanceof IllegalStateException);
+        }
+    }
 }

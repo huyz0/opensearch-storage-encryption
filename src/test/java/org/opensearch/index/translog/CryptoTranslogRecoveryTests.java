@@ -8,9 +8,13 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.stream.Stream;
 
 import javax.crypto.spec.SecretKeySpec;
 
@@ -110,5 +114,37 @@ public class CryptoTranslogRecoveryTests extends OpenSearchTestCase {
         try (LocalTranslog translog = open()) {
             assertOps(translog, sources);
         }
+
+        // On disk: every generation with data is in the OST2 format and holds no operation source.
+        int headerSize = new TranslogHeader(uuid, 1L).sizeInBytes();
+        try (Stream<Path> files = Files.list(dir)) {
+            for (Path file : files.filter(f -> f.getFileName().toString().endsWith(".tlog")).toList()) {
+                byte[] onDisk = Files.readAllBytes(file);
+                if (onDisk.length > headerSize) {
+                    assertEquals(
+                        file.toString(),
+                        CryptoFileChannelWrapper.MAGIC,
+                        ByteBuffer.wrap(onDisk, headerSize, Integer.BYTES).getInt()
+                    );
+                    for (byte[] source : sources) {
+                        if (source.length >= 16) {
+                            assertEquals(file + " contains plaintext", -1, indexOf(onDisk, Arrays.copyOf(source, 16)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static int indexOf(byte[] haystack, byte[] needle) {
+        outer: for (int i = 0; i + needle.length <= haystack.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (haystack[i + j] != needle[j]) {
+                    continue outer;
+                }
+            }
+            return i;
+        }
+        return -1;
     }
 }

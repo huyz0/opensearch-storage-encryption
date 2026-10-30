@@ -356,12 +356,15 @@ public class CryptoFileChannelWrapper extends FileChannel {
         }
     }
 
-    /** Builds the cipher for {@code nonce}, reporting a key failure as an IOException as core expects. */
+    /** Builds the cipher for {@code nonce}, reporting a key or derivation failure as an IOException as core expects. */
     private TranslogCipher newCipher(byte[] nonce) throws IOException {
         try {
             return new TranslogCipher(keyResolver.getDataKey(), nonce);
         } catch (RuntimeException e) {
-            throw new IOException("Failed to resolve the data key for translog file " + filePath, e);
+            throw new IOException(
+                "Failed to set up the cipher for translog file " + filePath + " (data key unavailable or key derivation failed)",
+                e
+            );
         }
     }
 

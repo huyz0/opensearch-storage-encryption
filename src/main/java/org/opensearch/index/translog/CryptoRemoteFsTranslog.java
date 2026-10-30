@@ -73,9 +73,6 @@ public class CryptoRemoteFsTranslog extends RemoteFsTranslog {
             createCryptoChannelFactory(keyResolver, translogUUID),
             true // isServerSideEncryptionEnabled
         );
-        if (!(this.channelFactory instanceof CryptoChannelFactory)) {
-            throw new IOException("Translog is not using the crypto channel factory; refusing to write plaintext");
-        }
 
         this.keyResolver = keyResolver;
         this.translogUUID = translogUUID;
