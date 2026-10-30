@@ -91,11 +91,13 @@ public class CaffeineBlockCachePoolPressureTests extends OpenSearchTestCase {
             .newBuilder()
             .maximumSize(1000)
             .executor(Runnable::run)
-            .removalListener((BlockCacheKey k, BlockCacheValue<RefCountedMemorySegment> v, com.github.benmanes.caffeine.cache.RemovalCause c) -> {
-                if (v != null) {
-                    v.close();
+            .removalListener(
+                (BlockCacheKey k, BlockCacheValue<RefCountedMemorySegment> v, com.github.benmanes.caffeine.cache.RemovalCause c) -> {
+                    if (v != null) {
+                        v.close();
+                    }
                 }
-            })
+            )
             .build();
         PoolBackedLoader loader = new PoolBackedLoader(pool);
         CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment> cache = new CaffeineBlockCache<>(caffeine, loader, 1000);
@@ -114,7 +116,10 @@ public class CaffeineBlockCachePoolPressureTests extends OpenSearchTestCase {
         assertNull("the coldest entry should have been evicted to free a segment", caffeine.getIfPresent(key(0)));
         assertNotNull(caffeine.getIfPresent(key(POOL_SEGMENTS)));
         for (long timeout : loader.timeoutsMs) {
-            assertTrue("loads inside the map lock must only wait briefly, got " + timeout, timeout <= BlockLoader.CACHE_LOAD_POOL_TIMEOUT_MS);
+            assertTrue(
+                "loads inside the map lock must only wait briefly, got " + timeout,
+                timeout <= BlockLoader.CACHE_LOAD_POOL_TIMEOUT_MS
+            );
         }
         caffeine.invalidateAll();
     }

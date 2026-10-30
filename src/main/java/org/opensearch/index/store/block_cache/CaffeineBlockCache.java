@@ -100,15 +100,25 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
         // same bin behind a multi-second wait that cannot free anything by itself.
         long deadline = System.nanoTime() + poolWaitBudgetNanos;
         long backoffMs = 1;
-        while (true) {
+        for (int attempt = 1;; attempt++) {
             try {
                 return loadOnce(key);
             } catch (UncheckedIOException e) {
-                if (!(e.getCause() instanceof BlockLoader.PoolAcquireFailedException) || System.nanoTime() - deadline >= 0) {
+                if (!(e.getCause() instanceof BlockLoader.PoolAcquireFailedException)) {
                     throw e;
                 }
+                long remainingMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+                if (remainingMs <= 0) {
+                    LOGGER.warn("Gave up loading {} after {} attempts: segment pool exhausted", key, attempt);
+                    throw e;
+                }
+                backoffMs = Math.min(backoffMs, remainingMs);
             }
-            relievePoolPressure();
+            // Evict on attempts 1, 2, 4, 8, ... so a long wait does not drain the whole shared cache
+            // when the segments are pinned by readers and evicting cannot free them.
+            if ((attempt & (attempt - 1)) == 0) {
+                relievePoolPressure();
+            }
             try {
                 Thread.sleep(backoffMs);
             } catch (InterruptedException ie) {

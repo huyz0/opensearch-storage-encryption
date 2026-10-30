@@ -100,7 +100,8 @@ public interface BlockLoader<T> {
      * @param startOffset starting file offset (should be block-aligned)
      * @param blockCount number of blocks to read
      * @param poolTimeoutMs timeout in milliseconds for acquiring pool segments
-     *                      (use 50ms for prefetch, 5000ms for on-demand loads)
+     *                      (50ms for bulk prefetch; {@link #CACHE_LOAD_POOL_TIMEOUT_MS} for loads
+     *                      made under the block cache's lock)
      * @return array of loaded memory segments (length equals blockCount)
      * @throws Exception if loading fails due to I/O errors, pool pressure, or other issues
      */

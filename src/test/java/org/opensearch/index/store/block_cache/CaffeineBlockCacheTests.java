@@ -168,7 +168,12 @@ public class CaffeineBlockCacheTests extends OpenSearchTestCase {
         BlockCacheKey key = new FileBlockCacheKey(Paths.get("/test/file.dat"), 0L);
 
         when(mockLoader.load(key)).thenThrow(new BlockLoader.PoolAcquireFailedException("Acquire timeout"));
-        CaffeineBlockCache<String, BlockCacheValue<String>> shortBudget = new CaffeineBlockCache<>(caffeineCache, mockLoader, MAX_BLOCKS, 50);
+        CaffeineBlockCache<String, BlockCacheValue<String>> shortBudget = new CaffeineBlockCache<>(
+            caffeineCache,
+            mockLoader,
+            MAX_BLOCKS,
+            50
+        );
 
         expectThrows(Exception.class, () -> shortBudget.getOrLoad(key));
         verify(mockLoader, org.mockito.Mockito.atLeast(2)).load(key);
