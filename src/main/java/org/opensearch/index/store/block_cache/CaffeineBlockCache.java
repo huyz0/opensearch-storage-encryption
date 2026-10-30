@@ -7,10 +7,12 @@ package org.opensearch.index.store.block_cache;
 import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_SIZE;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -39,6 +41,15 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
 
     private final Cache<BlockCacheKey, BlockCacheValue<T>> cache;
     private final BlockLoader<V> blockLoader;
+    private final long poolWaitBudgetNanos;
+
+    /** Total time a cache miss may wait for a free pool segment before failing (the old in-lock wait). */
+    static final long DEFAULT_POOL_WAIT_BUDGET_MS = 5000;
+
+    /** Cold entries evicted per retry when a miss finds the segment pool exhausted. */
+    static final int POOL_PRESSURE_EVICTION_BATCH = 16;
+
+    private static final long MAX_POOL_RETRY_BACKOFF_MS = 32;
 
     /**
      * Constructs a new CaffeineBlockCache with the specified cache and block loader.
@@ -48,8 +59,13 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
      * @param maxBlocks the maximum number of blocks to cache (currently unused but kept for API compatibility)
      */
     public CaffeineBlockCache(Cache<BlockCacheKey, BlockCacheValue<T>> cache, BlockLoader<V> blockLoader, long maxBlocks) {
+        this(cache, blockLoader, maxBlocks, DEFAULT_POOL_WAIT_BUDGET_MS);
+    }
+
+    CaffeineBlockCache(Cache<BlockCacheKey, BlockCacheValue<T>> cache, BlockLoader<V> blockLoader, long maxBlocks, long poolWaitBudgetMs) {
         this.blockLoader = blockLoader;
         this.cache = cache;
+        this.poolWaitBudgetNanos = TimeUnit.MILLISECONDS.toNanos(poolWaitBudgetMs);
     }
 
     @Override
@@ -78,6 +94,47 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
     */
     @Override
     public BlockCacheValue<T> getOrLoad(BlockCacheKey key) throws IOException {
+        // The loader runs inside the map's compute lock, so it only waits briefly for a pool segment
+        // (BlockLoader.CACHE_LOAD_POOL_TIMEOUT_MS). When the pool is exhausted we evict cold entries
+        // and back off here, outside the lock, instead of convoying every thread that hashes to the
+        // same bin behind a multi-second wait that cannot free anything by itself.
+        long deadline = System.nanoTime() + poolWaitBudgetNanos;
+        long backoffMs = 1;
+        while (true) {
+            try {
+                return loadOnce(key);
+            } catch (UncheckedIOException e) {
+                if (!(e.getCause() instanceof BlockLoader.PoolAcquireFailedException) || System.nanoTime() - deadline >= 0) {
+                    throw e;
+                }
+            }
+            relievePoolPressure();
+            try {
+                Thread.sleep(backoffMs);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new InterruptedIOException("Interrupted while waiting for pool space to load " + key);
+            }
+            backoffMs = Math.min(backoffMs * 2, MAX_POOL_RETRY_BACKOFF_MS);
+        }
+    }
+
+    /**
+     * Evicts the coldest entries so their segments can return to the pool. Eviction is otherwise driven
+     * only by the cache's entry count, which does not see segments held by readers, in-flight loads,
+     * or removals still being processed, so the pool can run dry while the cache is under its limit.
+     */
+    private void relievePoolPressure() {
+        cache.cleanUp();
+        cache.policy().eviction().ifPresent(eviction -> {
+            var coldest = eviction.coldest(POOL_PRESSURE_EVICTION_BATCH).keySet();
+            if (!coldest.isEmpty()) {
+                cache.invalidateAll(coldest);
+            }
+        });
+    }
+
+    private BlockCacheValue<T> loadOnce(BlockCacheKey key) throws IOException {
         try {
             BlockCacheValue<T> value = cache.get(key, k -> {
                 try {

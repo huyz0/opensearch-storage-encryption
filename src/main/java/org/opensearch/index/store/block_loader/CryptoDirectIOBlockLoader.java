@@ -133,7 +133,13 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
 
             try {
                 while (blockIndex < blockCount && bytesCopied < bytesRead) {
-                    RefCountedMemorySegment handle = segmentPool.tryAcquire(poolTimeoutMs, TimeUnit.MILLISECONDS);
+                    RefCountedMemorySegment handle;
+                    try {
+                        handle = segmentPool.tryAcquire(poolTimeoutMs, TimeUnit.MILLISECONDS);
+                    } catch (IOException e) {
+                        // The pool reports a timeout as a plain IOException; callers retry on this type
+                        throw new PoolAcquireFailedException(e.getMessage(), e);
+                    }
                     MemorySegment pooled = handle.segment();
 
                     int remaining = (int) (bytesRead - bytesCopied);
