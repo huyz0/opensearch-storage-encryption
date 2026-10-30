@@ -279,7 +279,7 @@ public class TranslogChunkManager {
      *
      * @param dst the buffer to read data into
      * @param position the file position to read from
-     * @return the number of bytes read
+     * @return the number of bytes read, or -1 if the position is at or past the end of the data
      * @throws IOException if reading fails
      */
     public int readFromChunks(ByteBuffer dst, long position) throws IOException {
@@ -302,12 +302,15 @@ public class TranslogChunkManager {
 
         // Extract requested data from decrypted chunk
         int available = Math.max(0, decryptedChunk.length - chunkInfo.offsetInChunk);
-        int toRead = Math.min(dst.remaining(), available);
-
-        if (toRead > 0) {
-            dst.put(decryptedChunk, chunkInfo.offsetInChunk, toRead);
+        if (available == 0) {
+            // Nothing stored at or after this position. Report EOF as FileChannel does: a 0 here
+            // makes callers that loop until the buffer is full spin, and makes stream readers
+            // stop early without knowing the data was cut short.
+            return -1;
         }
 
+        int toRead = Math.min(dst.remaining(), available);
+        dst.put(decryptedChunk, chunkInfo.offsetInChunk, toRead);
         return toRead;
     }
 

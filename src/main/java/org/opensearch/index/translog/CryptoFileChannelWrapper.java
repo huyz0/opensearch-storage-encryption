@@ -123,7 +123,13 @@ public class CryptoFileChannelWrapper extends FileChannel {
             ByteBuffer dst = dsts[i];
             if (dst.remaining() > 0) {
                 int bytesRead = read(dst, currentPosition + totalBytesRead);
-                if (bytesRead <= 0) {
+                if (bytesRead < 0) {
+                    if (totalBytesRead == 0) {
+                        return -1;
+                    }
+                    break;
+                }
+                if (bytesRead == 0) {
                     break;
                 }
                 totalBytesRead += bytesRead;
