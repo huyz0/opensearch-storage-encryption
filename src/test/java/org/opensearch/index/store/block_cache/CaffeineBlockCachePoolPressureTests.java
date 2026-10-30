@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
@@ -179,10 +180,8 @@ public class CaffeineBlockCachePoolPressureTests extends OpenSearchTestCase {
         for (int i = 0; i < POOL_SEGMENTS; i++) {
             held[i] = pool.tryAcquire(10, TimeUnit.MILLISECONDS);
         }
-        java.util.concurrent.CompletableFuture<BlockCacheValue<RefCountedMemorySegment>> first =
-            new java.util.concurrent.CompletableFuture<>();
-        java.util.concurrent.CompletableFuture<BlockCacheValue<RefCountedMemorySegment>> second =
-            new java.util.concurrent.CompletableFuture<>();
+        CompletableFuture<BlockCacheValue<RefCountedMemorySegment>> first = new CompletableFuture<>();
+        CompletableFuture<BlockCacheValue<RefCountedMemorySegment>> second = new CompletableFuture<>();
         Thread firstThread = missInBackground(cache, key(100), first);
         // wait until the first miss is queued in its wait outside the lock
         assertBusy(() -> {
@@ -220,13 +219,18 @@ public class CaffeineBlockCachePoolPressureTests extends OpenSearchTestCase {
     public void testReservedSegmentIsReturnedWhenAnotherThreadCachedTheBlock() throws Exception {
         Cache<BlockCacheKey, BlockCacheValue<RefCountedMemorySegment>> caffeine = Caffeine.newBuilder().maximumSize(1000).build();
         PoolBackedLoader loader = new PoolBackedLoader(pool);
-        CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment> cache = new CaffeineBlockCache<>(caffeine, loader, 1000, 10_000);
+        CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment> cache = new CaffeineBlockCache<>(
+            caffeine,
+            loader,
+            1000,
+            10_000
+        );
 
         RefCountedMemorySegment[] held = new RefCountedMemorySegment[POOL_SEGMENTS];
         for (int i = 0; i < POOL_SEGMENTS; i++) {
             held[i] = pool.tryAcquire(10, TimeUnit.MILLISECONDS);
         }
-        java.util.concurrent.CompletableFuture<BlockCacheValue<RefCountedMemorySegment>> miss = new java.util.concurrent.CompletableFuture<>();
+        CompletableFuture<BlockCacheValue<RefCountedMemorySegment>> miss = new CompletableFuture<>();
         Thread t = missInBackground(cache, key(7), miss);
         assertBusy(() -> {
             assertEquals(1, loader.reservations.get());
@@ -251,7 +255,7 @@ public class CaffeineBlockCachePoolPressureTests extends OpenSearchTestCase {
     private static Thread missInBackground(
         CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment> cache,
         BlockCacheKey key,
-        java.util.concurrent.CompletableFuture<BlockCacheValue<RefCountedMemorySegment>> result
+        CompletableFuture<BlockCacheValue<RefCountedMemorySegment>> result
     ) {
         Thread t = new Thread(() -> {
             try {
