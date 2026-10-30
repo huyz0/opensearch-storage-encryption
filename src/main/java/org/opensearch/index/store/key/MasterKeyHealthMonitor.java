@@ -17,7 +17,6 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Function;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -86,10 +85,20 @@ public class MasterKeyHealthMonitor {
         .listSetting(
             "index.store.crypto.health_monitor_blocks",
             Collections.emptyList(),
-            Function.identity(),
+            MasterKeyHealthMonitor::parseOwnedBlock,
             Setting.Property.IndexScope,
-            Setting.Property.Dynamic
+            Setting.Property.Dynamic,
+            Setting.Property.NotCopyableOnResize
         );
+
+    private static String parseOwnedBlock(String value) {
+        if (WRITE_BLOCK.equals(value) == false && READ_BLOCK.equals(value) == false) {
+            throw new IllegalArgumentException(
+                "invalid value [" + value + "] for [index.store.crypto.health_monitor_blocks], expected [write] or [read]"
+            );
+        }
+        return value;
+    }
 
     /**
      * Tracks failure state for an index and block status.
@@ -231,8 +240,14 @@ public class MasterKeyHealthMonitor {
      * @param indexName the index name
      */
     public void reportSuccess(String indexUuid, String indexName) {
-        failureTracker.remove(indexUuid);
-        removeOwnedBlocks(indexName);
+        FailureState state = failureTracker.remove(indexUuid);
+        if (state != null) {
+            synchronized (state) {
+                removeOwnedBlocks(indexName);
+            }
+        } else {
+            removeOwnedBlocks(indexName);
+        }
     }
 
     /**
@@ -297,12 +312,14 @@ public class MasterKeyHealthMonitor {
             healthCheckExecutor.schedule(() -> {
                 synchronized (state) {
                     state.readBlockScheduled = false;
+                    // Checked under the lock that reportSuccess holds while clearing, so a recovered index
+                    // can't be re-blocked
+                    if (failureTracker.get(indexUuid) != state) {
+                        // Recovered (or tracking reset) during the grace period
+                        return;
+                    }
+                    applyBlock(indexName, READ_BLOCK);
                 }
-                if (failureTracker.get(indexUuid) != state) {
-                    // Recovered (or tracking reset) during the grace period
-                    return;
-                }
-                applyBlock(indexName, READ_BLOCK);
             }, BLOCK_GRACE_PERIOD_SECONDS, TimeUnit.SECONDS);
         } catch (Exception e) {
             state.readBlockScheduled = false;

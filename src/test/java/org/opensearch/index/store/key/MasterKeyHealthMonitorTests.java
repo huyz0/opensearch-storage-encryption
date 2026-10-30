@@ -32,6 +32,7 @@ import org.opensearch.cluster.metadata.Metadata;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.action.ActionFuture;
+import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.index.store.key.MasterKeyHealthMonitor.FailureState;
@@ -626,5 +627,19 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
     public void testOwnershipSettingIsDynamicIndexSetting() {
         assertTrue(MasterKeyHealthMonitor.INDEX_HEALTH_MONITOR_BLOCKS_SETTING.isDynamic());
         assertEquals(List.of(), MasterKeyHealthMonitor.INDEX_HEALTH_MONITOR_BLOCKS_SETTING.get(Settings.EMPTY));
+    }
+
+    public void testOwnershipSettingAcceptsOnlyWriteAndRead() {
+        assertEquals(
+            List.of("write", "read"),
+            MasterKeyHealthMonitor.INDEX_HEALTH_MONITOR_BLOCKS_SETTING.get(Settings.builder().putList(OWNED, "write", "read").build())
+        );
+        expectThrows(
+            IllegalArgumentException.class,
+            () -> MasterKeyHealthMonitor.INDEX_HEALTH_MONITOR_BLOCKS_SETTING.get(Settings.builder().putList(OWNED, "metadata").build())
+        );
+        assertTrue(
+            MasterKeyHealthMonitor.INDEX_HEALTH_MONITOR_BLOCKS_SETTING.getProperties().contains(Setting.Property.NotCopyableOnResize)
+        );
     }
 }
