@@ -18,8 +18,8 @@ import static org.mockito.Mockito.when;
 import java.lang.reflect.Field;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 
@@ -682,7 +682,8 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
             readers.add(Thread.currentThread());
             return mockClusterState;
         });
-        when(mockIndexMetadata.getSettings()).thenReturn(Settings.builder().put("index.blocks.write", true).putList(OWNED, "write").build());
+        when(mockIndexMetadata.getSettings())
+            .thenReturn(Settings.builder().put("index.blocks.write", true).putList(OWNED, "write").build());
 
         monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
         monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
@@ -696,7 +697,8 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
      * A removal queued by a recovery is dropped if a critical failure is reported before it runs
      */
     public void testQueuedRemovalSkippedAfterCriticalFailure() throws Exception {
-        when(mockIndexMetadata.getSettings()).thenReturn(Settings.builder().put("index.blocks.write", true).putList(OWNED, "write").build());
+        when(mockIndexMetadata.getSettings())
+            .thenReturn(Settings.builder().put("index.blocks.write", true).putList(OWNED, "write").build());
 
         CountDownLatch release = holdBlockUpdates();
         monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
@@ -710,7 +712,8 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
      * A transient failure (throttling) reported before a queued removal runs doesn't keep the blocks up
      */
     public void testQueuedRemovalRunsAfterTransientFailure() throws Exception {
-        when(mockIndexMetadata.getSettings()).thenReturn(Settings.builder().put("index.blocks.write", true).putList(OWNED, "write").build());
+        when(mockIndexMetadata.getSettings())
+            .thenReturn(Settings.builder().put("index.blocks.write", true).putList(OWNED, "write").build());
 
         CountDownLatch release = holdBlockUpdates();
         monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
