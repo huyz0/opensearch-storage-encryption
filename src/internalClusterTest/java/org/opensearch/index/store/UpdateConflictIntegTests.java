@@ -125,6 +125,9 @@ public class UpdateConflictIntegTests extends OpenSearchIntegTestCase {
             .put("index.merge.policy.segments_per_tier", "10")
             .put("index.merge.policy.max_merge_at_once", "10")
             .put("index.merge.policy.floor_segment", "2mb")
+            // With -ea, core's TranslogWriter keeps every op of the current generation plus a stack
+            // trace (seenSequenceNumbers). At the default 64mb threshold that exceeds the 512m test heap.
+            .put("index.translog.generation_threshold_size", "1mb")
             .build();
 
         createIndex(indexName, settings);
