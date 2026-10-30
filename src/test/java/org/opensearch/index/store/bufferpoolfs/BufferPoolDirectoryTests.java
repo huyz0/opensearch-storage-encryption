@@ -130,6 +130,19 @@ public class BufferPoolDirectoryTests extends OpenSearchTestCase {
      * a catch block that calls CryptoMetricsService (which isn't initialized in
      * unit tests).
      */
+    /**
+     * The read-ahead worker is shared by every directory on the node, so closing one
+     * directory (shard close, relocation, deletion) must not stop it for the others.
+     */
+    public void testCloseDoesNotStopSharedReadaheadWorker() throws Exception {
+        Worker worker = poolResources.getSharedReadaheadWorker();
+        assertTrue(worker.isRunning());
+
+        directory.close();
+
+        assertTrue("Shared read-ahead worker must survive a directory close", worker.isRunning());
+    }
+
     public void testCloseMarksDirectoryAsClosed() throws Exception {
         // Close the directory
         directory.close();
