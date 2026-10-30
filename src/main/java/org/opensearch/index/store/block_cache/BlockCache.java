@@ -31,6 +31,18 @@ public interface BlockCache<T> {
     BlockCacheValue<T> get(BlockCacheKey key);
 
     /**
+     * Returns the block if cached, or null if absent, without counting as an access.
+     * Unlike {@link #get}, this does not update hit/miss statistics or eviction order,
+     * so it suits internal consistency checks on the read path.
+     *
+     * @param key the cache key identifying the block
+     * @return the cached block value, or null if not present
+     */
+    default BlockCacheValue<T> peek(BlockCacheKey key) {
+        return get(key);
+    }
+
+    /**
      * Returns the block, loading it via {@code BlockLoader} if absent.
      * 
      * @param key the cache key identifying the block

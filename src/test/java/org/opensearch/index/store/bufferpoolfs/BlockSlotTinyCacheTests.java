@@ -49,6 +49,8 @@ public class BlockSlotTinyCacheTests extends OpenSearchTestCase {
     public void setUp() throws Exception {
         super.setUp();
         mockCache = mock(BlockCache.class);
+        // peek is a default method, which a Mockito mock stubs to null; route it to get() as the default does.
+        when(mockCache.peek(any(FileBlockCacheKey.class))).thenAnswer(inv -> mockCache.get(inv.getArgument(0)));
         testPath = Paths.get("/test/file.dat");
         arena = Arena.ofAuto();
     }
@@ -396,8 +398,13 @@ public class BlockSlotTinyCacheTests extends OpenSearchTestCase {
             return null;
         }).when(cacheValue).unpin();
 
-        when(mockCache.get(any(FileBlockCacheKey.class))).thenReturn(null); // First call returns null
-        when(mockCache.getOrLoad(any(FileBlockCacheKey.class))).thenReturn(cacheValue);
+        // Behave like a real cache: the key is absent until getOrLoad inserts it.
+        AtomicReference<BlockCacheValue<RefCountedMemorySegment>> mapped = new AtomicReference<>();
+        when(mockCache.get(any(FileBlockCacheKey.class))).thenAnswer(inv -> mapped.get());
+        when(mockCache.getOrLoad(any(FileBlockCacheKey.class))).thenAnswer(inv -> {
+            mapped.set(cacheValue);
+            return cacheValue;
+        });
 
         // Should succeed after retries
         BlockCacheValue<RefCountedMemorySegment> result = cache.acquireRefCountedValue(0);
@@ -542,8 +549,9 @@ public class BlockSlotTinyCacheTests extends OpenSearchTestCase {
             return null;
         }).when(cacheValue).unpin();
 
-        // Main cache behavior: always return same object for the key (like "stale handle")
-        when(mockCache.get(any(FileBlockCacheKey.class))).thenReturn(cacheValue);
+        // L2 maps the key to cacheValue until the eviction below, then to whatever getOrLoad inserts.
+        AtomicReference<BlockCacheValue<RefCountedMemorySegment>> mapped = new AtomicReference<>(cacheValue);
+        when(mockCache.get(any(FileBlockCacheKey.class))).thenAnswer(inv -> mapped.get());
 
         // If your Tier-3 falls back to load on mismatch, provide a fresh object for getOrLoad
         MemorySegment fresh = arena.allocate(BLOCK_SIZE);
@@ -558,7 +566,10 @@ public class BlockSlotTinyCacheTests extends OpenSearchTestCase {
             return null;
         }).when(freshValue).unpin();
 
-        when(mockCache.getOrLoad(any(FileBlockCacheKey.class))).thenReturn(freshValue);
+        when(mockCache.getOrLoad(any(FileBlockCacheKey.class))).thenAnswer(inv -> {
+            mapped.compareAndSet(null, freshValue);
+            return mapped.get();
+        });
 
         ExecutorService exec = Executors.newFixedThreadPool(2);
         AtomicReference<BlockCacheValue<RefCountedMemorySegment>> t1Result = new AtomicReference<>();
@@ -579,6 +590,7 @@ public class BlockSlotTinyCacheTests extends OpenSearchTestCase {
                 assertTrue("T1 never reached tryPin", tryPinEntered.await(5, TimeUnit.SECONDS));
 
                 // Simulate eviction + recycle of the same object
+                mapped.set(null);
                 refSegment.close();         // drops cache ref, generation++, refCount->0 (releaser is noop)
                 segment.fill((byte) 0xBB);  // overwrite underlying bytes (reused for another block)
                 refSegment.reset();         // refCount=1 again (reused)
@@ -602,5 +614,66 @@ public class BlockSlotTinyCacheTests extends OpenSearchTestCase {
         assertEquals((byte) 0xAA, b);
 
         result.unpin();
+    }
+
+    /**
+     * Reproduces #176: the L2 entry is evicted and its segment recycled for another block after
+     * cache.get() returns but before the generation is read. The generation check alone passes
+     * because it compares the new owner's generation with itself, so the other block's bytes
+     * used to be returned. The block must instead be reloaded for this key.
+     */
+    public void testRecycleBetweenL2LookupAndGenerationReadIsDetected() throws IOException {
+        BlockSlotTinyCache cache = new BlockSlotTinyCache(mockCache, testPath, BLOCK_SIZE * 100);
+
+        MemorySegment segment = arena.allocate(BLOCK_SIZE);
+        segment.fill((byte) 0xAA);
+        RefCountedMemorySegment recycled = new RefCountedMemorySegment(segment, BLOCK_SIZE, (seg) -> {});
+        BlockCacheValue<RefCountedMemorySegment> recycledValue = wrap(recycled);
+
+        MemorySegment fresh = arena.allocate(BLOCK_SIZE);
+        fresh.fill((byte) 0xAA);
+        RefCountedMemorySegment freshSeg = new RefCountedMemorySegment(fresh, BLOCK_SIZE, (seg) -> {});
+        BlockCacheValue<RefCountedMemorySegment> freshValue = wrap(freshSeg);
+
+        // What L2 currently maps our key to.
+        AtomicReference<BlockCacheValue<RefCountedMemorySegment>> mapped = new AtomicReference<>(recycledValue);
+        AtomicInteger lookups = new AtomicInteger();
+        when(mockCache.get(any(FileBlockCacheKey.class))).thenAnswer(inv -> {
+            BlockCacheValue<RefCountedMemorySegment> v = mapped.get();
+            if (lookups.getAndIncrement() == 0) {
+                // Right after the lookup returns: evict our key and recycle the segment for another block.
+                mapped.set(null);
+                recycled.close();
+                segment.fill((byte) 0xBB);
+                recycled.reset();
+            }
+            return v;
+        });
+        when(mockCache.getOrLoad(any(FileBlockCacheKey.class))).thenAnswer(inv -> {
+            mapped.set(freshValue);
+            return freshValue;
+        });
+
+        BlockCacheValue<RefCountedMemorySegment> result = cache.acquireRefCountedValue(0);
+
+        assertSame("must not return a segment recycled for another block", freshValue, result);
+        assertEquals((byte) 0xAA, result.value().segment().get(java.lang.foreign.ValueLayout.JAVA_BYTE, 0));
+        assertEquals("pin on the recycled segment must be released", 1, recycled.getRefCount());
+        assertEquals(2, freshSeg.getRefCount());
+
+        // The recycled segment must not have been published to L1 either.
+        result.unpin();
+        assertSame(freshValue, cache.acquireRefCountedValue(0));
+    }
+
+    private BlockCacheValue<RefCountedMemorySegment> wrap(RefCountedMemorySegment seg) {
+        BlockCacheValue<RefCountedMemorySegment> value = mock(BlockCacheValue.class);
+        when(value.value()).thenReturn(seg);
+        when(value.tryPin()).thenAnswer(inv -> seg.tryPin());
+        doAnswer(inv -> {
+            seg.unpin();
+            return null;
+        }).when(value).unpin();
+        return value;
     }
 }

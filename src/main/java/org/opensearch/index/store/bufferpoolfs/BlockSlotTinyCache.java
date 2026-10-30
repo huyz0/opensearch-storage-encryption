@@ -49,7 +49,7 @@ public class BlockSlotTinyCache {
         }
     }
 
-    private record SlotEntry(long blockIdx, BlockCacheValue<RefCountedMemorySegment>val, int gen) {
+    private record SlotEntry(long blockIdx, BlockCacheValue<RefCountedMemorySegment> val, int gen) {
     }
 
     private static final int SLOT_COUNT = 32;
@@ -104,7 +104,7 @@ public class BlockSlotTinyCache {
             if (v != null) {
                 final int expectedGen = v.value().getGeneration();
                 if (v.tryPin()) {
-                    if (v.value().getGeneration() == expectedGen) {
+                    if (v.value().getGeneration() == expectedGen && isStillMappedTo(key, v)) {
                         publishToL1(slotIdx, blockIdx, v, expectedGen);
                         if (hitHolder != null)
                             hitHolder.setWasCacheHit(true);
@@ -118,7 +118,7 @@ public class BlockSlotTinyCache {
             if (loaded != null) {
                 final int expectedGen = loaded.value().getGeneration();
                 if (loaded.tryPin()) {
-                    if (loaded.value().getGeneration() == expectedGen) {
+                    if (loaded.value().getGeneration() == expectedGen && isStillMappedTo(key, loaded)) {
                         publishToL1(slotIdx, blockIdx, loaded, expectedGen);
                         if (hitHolder != null)
                             hitHolder.setWasCacheHit(false);
@@ -134,6 +134,20 @@ public class BlockSlotTinyCache {
         }
 
         throw new IOException("Unable to pin memory segment for block offset " + blockOff + " after " + maxAttempts + " attempts");
+    }
+
+    /**
+     * Confirms that a value we just pinned still belongs to {@code key}.
+     *
+     * The generation is read from the live object after the L2 lookup returns, so an
+     * evict-then-recycle between the lookup and the pin leaves the generation check
+     * comparing the new owner's generation with itself. The pin stops any further
+     * recycling, so if L2 still maps {@code key} to this exact object once we hold it,
+     * the segment holds this key's block. Uses {@link BlockCache#peek} so the check
+     * does not count as a cache hit in the stats that drive read-ahead throttling.
+     */
+    private boolean isStillMappedTo(FileBlockCacheKey key, BlockCacheValue<RefCountedMemorySegment> pinned) {
+        return cache.peek(key) == pinned;
     }
 
     private void publishToL1(int slotIdx, long blockIdx, BlockCacheValue<RefCountedMemorySegment> v, int gen) {

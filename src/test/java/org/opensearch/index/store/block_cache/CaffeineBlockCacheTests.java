@@ -70,6 +70,22 @@ public class CaffeineBlockCacheTests extends OpenSearchTestCase {
     }
 
     /**
+     * Tests that peek returns the mapped value without counting as a hit or a miss.
+     */
+    public void testPeekDoesNotRecordStats() {
+        BlockCacheKey key = new FileBlockCacheKey(Paths.get("/test/file.dat"), 0L);
+        BlockCacheKey absent = new FileBlockCacheKey(Paths.get("/test/file.dat"), 8192L);
+        BlockCacheValue<String> value = createMockValue("data");
+        blockCache.put(key, value);
+
+        assertSame(value, blockCache.peek(key));
+        assertNull(blockCache.peek(absent));
+
+        assertEquals(0, caffeineCache.stats().hitCount());
+        assertEquals(0, caffeineCache.stats().missCount());
+    }
+
+    /**
      * Tests put operation adds value to cache.
      */
     public void testPutAddsValueToCache() {
