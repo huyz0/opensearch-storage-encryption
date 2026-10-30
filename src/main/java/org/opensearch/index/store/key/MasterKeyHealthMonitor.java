@@ -11,6 +11,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
@@ -225,9 +226,18 @@ public class MasterKeyHealthMonitor {
 
         // Only apply blocks for CRITICAL errors with valid index name. This also re-asserts them on later
         // critical failures: blocks are cluster-wide, so another node that recovered may have removed them.
+        // Applying a block reads the cluster state, so it runs on the health check thread (see reportSuccess).
         if (failureType == FailureType.CRITICAL && indexName != null) {
-            applyBlocks(indexUuid, indexName, state);
             state.blocksApplied = true;
+            try {
+                healthCheckExecutor.execute(() -> {
+                    if (failureTracker.get(indexUuid) == state) {
+                        applyBlocks(indexUuid, indexName, state);
+                    }
+                });
+            } catch (RejectedExecutionException e) {
+                logger.debug("Health monitor is shut down, not applying blocks to index {}", indexName);
+            }
         }
     }
 
@@ -235,18 +245,31 @@ public class MasterKeyHealthMonitor {
      * Reports successful key load/reload for an index.
      * Removes the blocks the monitor applied to the index, if any, even if this node has no
      * record of the failure (for example after a restart).
+     *
+     * Block removal reads the cluster state, which is not allowed on the cluster applier thread,
+     * and the first key load runs there during shard creation. So the removal runs on the health
+     * check thread, and is skipped if a new failure for the index was reported in the meantime.
      * 
      * @param indexUuid the index UUID
      * @param indexName the index name
      */
     public void reportSuccess(String indexUuid, String indexName) {
         FailureState state = failureTracker.remove(indexUuid);
-        if (state != null) {
-            synchronized (state) {
-                removeOwnedBlocks(indexName);
-            }
-        } else {
-            removeOwnedBlocks(indexName);
+        try {
+            healthCheckExecutor.execute(() -> {
+                if (failureTracker.containsKey(indexUuid)) {
+                    return;
+                }
+                if (state != null) {
+                    synchronized (state) {
+                        removeOwnedBlocks(indexName);
+                    }
+                } else {
+                    removeOwnedBlocks(indexName);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            logger.debug("Health monitor is shut down, not removing blocks for index {}", indexName);
         }
     }
 

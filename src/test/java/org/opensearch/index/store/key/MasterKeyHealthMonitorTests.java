@@ -18,6 +18,9 @@ import static org.mockito.Mockito.when;
 import java.lang.reflect.Field;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.After;
 import org.junit.Before;
@@ -119,6 +122,16 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
     }
 
     /**
+     * Waits for the block updates that reportFailure and reportSuccess hand to the health check thread
+     */
+    @SuppressForbidden(reason = "Test needs to access private health check executor")
+    private void drainHealthCheckExecutor() throws Exception {
+        Field executorField = MasterKeyHealthMonitor.class.getDeclaredField("healthCheckExecutor");
+        executorField.setAccessible(true);
+        ((ExecutorService) executorField.get(monitor)).submit(() -> {}).get(10, TimeUnit.SECONDS);
+    }
+
+    /**
      * Transient errors (THROTTLING) should NOT apply blocks
      */
     public void testTransientErrorDoesNotApplyBlocks() throws Exception {
@@ -131,6 +144,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, transientError, FailureType.TRANSIENT);
 
         // Assert: No blocks applied
+        drainHealthCheckExecutor();
         verify(mockIndicesAdminClient, never()).updateSettings(any());
 
         // Verify failure tracked but blocksApplied=false
@@ -178,6 +192,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         Thread.sleep(100);
 
         // Assert: Still no blocks
+        drainHealthCheckExecutor();
         verify(mockIndicesAdminClient, never()).updateSettings(any());
 
         ConcurrentHashMap<String, FailureState> tracker = getFailureTracker();
@@ -255,6 +270,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         Thread.sleep(100);
 
         // Assert: No block operations since no blocks to remove
+        drainHealthCheckExecutor();
         verify(mockIndicesAdminClient, never()).updateSettings(any());
 
         // Verify failure tracker cleared
@@ -433,6 +449,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         Thread.sleep(100);
 
         // Assert: No blocks applied (transient errors don't trigger blocks)
+        drainHealthCheckExecutor();
         verify(mockIndicesAdminClient, never()).updateSettings(any());
 
         ConcurrentHashMap<String, FailureState> tracker = getFailureTracker();
@@ -505,21 +522,24 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         assertEquals("Wrapped DisabledException should be classified as CRITICAL", FailureType.CRITICAL, type);
     }
 
-    private List<UpdateSettingsRequest> capturedUpdateRequests() {
+    private List<UpdateSettingsRequest> capturedUpdateRequests() throws Exception {
+        drainHealthCheckExecutor();
         ArgumentCaptor<UpdateSettingsRequest> captor = ArgumentCaptor.forClass(UpdateSettingsRequest.class);
         verify(mockIndicesAdminClient, atLeastOnce()).updateSettings(captor.capture());
         return captor.getAllValues();
     }
 
     @SuppressWarnings("unchecked")
-    private UpdateSettingsRequest capturedRemovalRequest() {
+    private UpdateSettingsRequest capturedRemovalRequest() throws Exception {
+        drainHealthCheckExecutor();
         ArgumentCaptor<UpdateSettingsRequest> captor = ArgumentCaptor.forClass(UpdateSettingsRequest.class);
         verify(mockIndicesAdminClient).updateSettings(captor.capture(), any(ActionListener.class));
         return captor.getValue();
     }
 
     @SuppressWarnings("unchecked")
-    private void verifyNoRemoval() {
+    private void verifyNoRemoval() throws Exception {
+        drainHealthCheckExecutor();
         verify(mockIndicesAdminClient, never()).updateSettings(any(), any(ActionListener.class));
     }
 
@@ -586,6 +606,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
 
         monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
 
+        drainHealthCheckExecutor();
         verify(mockIndicesAdminClient, never()).updateSettings(any());
         verifyNoRemoval();
     }
@@ -599,6 +620,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
 
         monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
 
+        drainHealthCheckExecutor();
         verify(mockIndicesAdminClient, never()).updateSettings(any());
         verifyNoRemoval();
     }
@@ -612,6 +634,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         when(mockIndexMetadata.getSettings())
             .thenReturn(Settings.builder().put("index.blocks.write", true).putList(OWNED, "write").build());
         monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+        drainHealthCheckExecutor();
         verify(mockIndicesAdminClient, never()).updateSettings(any());
 
         // That node recovers and removes the block; this node is still failing
@@ -622,6 +645,27 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         assertEquals(1, requests.size());
         assertEquals("true", requests.get(0).settings().get("index.blocks.write"));
         assertEquals(List.of("write"), requests.get(0).settings().getAsList(OWNED));
+    }
+
+    /**
+     * Key loads run on the cluster applier thread during shard creation, where reading the cluster
+     * state trips an assertion that kills the applier task. Reporting must not read it on the caller's thread.
+     */
+    public void testReportingDoesNotReadClusterStateOnCallerThread() throws Exception {
+        Thread caller = Thread.currentThread();
+        List<Thread> readers = new CopyOnWriteArrayList<>();
+        when(mockClusterService.state()).thenAnswer(invocation -> {
+            readers.add(Thread.currentThread());
+            return mockClusterState;
+        });
+        when(mockIndexMetadata.getSettings()).thenReturn(Settings.builder().put("index.blocks.write", true).putList(OWNED, "write").build());
+
+        monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
+        monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+        drainHealthCheckExecutor();
+
+        assertFalse("Cluster state should be read on the health check thread", readers.isEmpty());
+        assertFalse("Cluster state must not be read on the reporting thread", readers.contains(caller));
     }
 
     public void testOwnershipSettingIsDynamicIndexSetting() {
