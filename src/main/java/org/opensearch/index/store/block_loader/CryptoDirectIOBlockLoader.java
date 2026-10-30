@@ -182,8 +182,9 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
     }
 
     /**
-     * Reads through the shared cached channel. Another thread that is interrupted while reading the
-     * same file closes the channel for everyone (FileChannel is interruptible), which surfaces here as
+     * Reads through the shared cached channel. Cached channels read natively and ignore interrupts, but
+     * where they fall back to the JDK FileChannel, another thread that is interrupted while reading the
+     * same file closes the channel for everyone, which surfaces here as
      * {@link java.nio.channels.AsynchronousCloseException}. That is not this reader's failure, so retry
      * on a fresh channel. If this thread was the one interrupted, propagate the exception. Nothing else
      * closes the channel mid-read: the ref held here keeps cache eviction from closing it.
@@ -191,8 +192,8 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
     private MemorySegment readAligned(String normalizedPath, Path filePath, long startOffset, long readLength, Arena arena)
         throws IOException {
         if (Thread.currentThread().isInterrupted()) {
-            // An already-cancelled thread would close the shared channel on its first read, and keep
-            // closing each replacement on every later load. Fail before touching it.
+            // Cancelled: fail before reading. With the JDK FileChannel fallback this also stops the
+            // thread from closing the shared channel, and each replacement, on every later load.
             throw new ClosedByInterruptException();
         }
         for (int attempt = 1;; attempt++) {
