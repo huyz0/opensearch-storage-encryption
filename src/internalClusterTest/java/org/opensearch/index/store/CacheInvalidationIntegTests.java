@@ -590,6 +590,21 @@ public class CacheInvalidationIntegTests extends OpenSearchIntegTestCase {
     }
 
     /**
+     * Clears the block cache and reopens the indices, so that the next reads miss every cache level
+     * and go through the block loader, which populates the FD cache.
+     *
+     * Clearing the shared block cache alone is not enough: each open IndexInput keeps its current block
+     * pinned ({@code CachedMemorySegmentIndexInput#currentBlock}) and reads it without a cache lookup, so
+     * with small segments the searches never miss and the FD cache stays empty. Reopening replaces those inputs.
+     */
+    private void reopenWithColdCaches(String... indices) {
+        clearBlockCache();
+        client().admin().indices().prepareClose(indices).get();
+        client().admin().indices().prepareOpen(indices).get();
+        ensureGreen(indices);
+    }
+
+    /**
      * Tests that FD cache entries are invalidated when an encrypted index is deleted.
      * After deletion, the FD cache should be empty (all entries for that index invalidated).
      * This prevents FD leaks where stale FileChannels remain open to deleted files.
@@ -618,8 +633,8 @@ public class CacheInvalidationIntegTests extends OpenSearchIntegTestCase {
         refresh();
         flush("test-fd-cache-delete");
 
-        // Clear block cache so reads go through block loader → FD cache
-        clearBlockCache();
+        // Reads now go through block loader → FD cache
+        reopenWithColdCaches("test-fd-cache-delete");
 
         // Reads now trigger block cache misses → CryptoDirectIOBlockLoader.load() → fileChannelCache.acquire()
         for (int i = 0; i < Math.min(50, numDocs); i++) {
@@ -677,8 +692,8 @@ public class CacheInvalidationIntegTests extends OpenSearchIntegTestCase {
         refresh();
         flush("test-fd-idx-1", "test-fd-idx-2");
 
-        // Clear block cache so reads populate FD cache
-        clearBlockCache();
+        // Make reads cold so they populate the FD cache
+        reopenWithColdCaches("test-fd-idx-1", "test-fd-idx-2");
 
         for (int i = 0; i < 20; i++) {
             client().prepareSearch("test-fd-idx-1").setQuery(org.opensearch.index.query.QueryBuilders.termQuery("number", i)).get();
@@ -746,8 +761,8 @@ public class CacheInvalidationIntegTests extends OpenSearchIntegTestCase {
         }
         refresh();
 
-        // Clear block cache so reads populate FD cache
-        clearBlockCache();
+        // Make reads cold so they populate the FD cache
+        reopenWithColdCaches("test-fd-merge");
 
         for (int i = 0; i < 50; i++) {
             client().prepareSearch("test-fd-merge").setQuery(org.opensearch.index.query.QueryBuilders.termQuery("number", i)).get();
@@ -815,8 +830,8 @@ public class CacheInvalidationIntegTests extends OpenSearchIntegTestCase {
         refresh();
         flush("test-fd-close");
 
-        // Clear block cache so reads populate FD cache
-        clearBlockCache();
+        // Make reads cold so they populate the FD cache
+        reopenWithColdCaches("test-fd-close");
 
         for (int i = 0; i < 20; i++) {
             client().prepareSearch("test-fd-close").setQuery(org.opensearch.index.query.QueryBuilders.termQuery("number", i)).get();
@@ -881,8 +896,8 @@ public class CacheInvalidationIntegTests extends OpenSearchIntegTestCase {
         refresh(indexNames);
         flush(indexNames);
 
-        // Clear block cache so reads populate FD cache
-        clearBlockCache();
+        // Make reads cold so they populate the FD cache
+        reopenWithColdCaches(indexNames);
 
         for (int idx = 0; idx < numIndices; idx++) {
             for (int i = 0; i < 10; i++) {
