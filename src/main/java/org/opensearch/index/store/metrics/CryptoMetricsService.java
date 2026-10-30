@@ -10,8 +10,6 @@ import org.opensearch.telemetry.metrics.Histogram;
 import org.opensearch.telemetry.metrics.MetricsRegistry;
 import org.opensearch.telemetry.metrics.tags.Tags;
 
-import lombok.NonNull;
-
 /**
  * Registry for crypto operations metrics and tracing.
  * Provides centralized access to telemetry data collection for encryption/decryption operations.
@@ -51,7 +49,7 @@ public class CryptoMetricsService {
      * Private constructor for singleton pattern.
      * @param metricsRegistry the metrics registry for collecting metrics
      */
-    private CryptoMetricsService(@NonNull MetricsRegistry metricsRegistry) {
+    private CryptoMetricsService(MetricsRegistry metricsRegistry) {
         this.metricsRegistry = metricsRegistry;
         this.errorCounter = createCounter(ERROR_COUNTER_NAME, ERROR_COUNTER_DESC, COUNT_UNIT);
         this.poolStatsHistogram = createHistogram(POOL_STATS_NAME, POOL_STATS_DESC, COUNT_UNIT);
@@ -63,7 +61,7 @@ public class CryptoMetricsService {
      * Initializes the singleton instance.
      * @param metricsRegistry the metrics registry for collecting metrics
      */
-    public static synchronized void initialize(@NonNull MetricsRegistry metricsRegistry) {
+    public static synchronized void initialize(MetricsRegistry metricsRegistry) {
         if (instance == null) {
             instance = new CryptoMetricsService(metricsRegistry);
         }
@@ -147,7 +145,7 @@ public class CryptoMetricsService {
      * Records error count by error type.
      * @param errorType the type of error
      */
-    public void recordError(@NonNull ErrorType errorType) {
+    public void recordError(ErrorType errorType) {
         if (errorCounter != null) {
             errorCounter.add(1.0, Tags.create().addTag(ERROR_TYPE_TAG, errorType.getValue()));
         }
@@ -158,7 +156,7 @@ public class CryptoMetricsService {
      * @param errorType the type of error
      * @param indexName the index name
      */
-    public void recordError(@NonNull ErrorType errorType, @NonNull String indexName) {
+    public void recordError(ErrorType errorType, String indexName) {
         if (errorCounter != null) {
             errorCounter.add(1.0, Tags.create().addTag(ERROR_TYPE_TAG, errorType.getValue()).addTag(INDEX_NAME, indexName));
         }
