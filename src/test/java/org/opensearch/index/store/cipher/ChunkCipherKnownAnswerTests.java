@@ -5,6 +5,7 @@
 package org.opensearch.index.store.cipher;
 
 import java.nio.ByteBuffer;
+import java.security.InvalidAlgorithmParameterException;
 import java.util.Arrays;
 import java.util.HexFormat;
 
@@ -38,6 +39,22 @@ public class ChunkCipherKnownAnswerTests extends OpenSearchTestCase {
         assertArrayEquals(hex("000000000000000000000001"), ChunkCipher.nonce(1));
         assertArrayEquals(hex("000000000102030405060708"), ChunkCipher.nonce(0x0102030405060708L));
         expectThrows(IllegalArgumentException.class, () -> ChunkCipher.nonce(-1));
+    }
+
+    /** The footer auth nonce (FF x 8 || 00 x 4) must never equal a chunk nonce. */
+    public void testChunkNoncesCannotCollideWithFooterNonce() {
+        byte[] footerNonce = hex("ffffffffffffffff00000000");
+        for (long index : new long[] {
+            0,
+            1,
+            0xffffffffL,
+            0xffffffff00000000L >>> 1,
+            Long.MAX_VALUE,
+            randomLongBetween(0, Long.MAX_VALUE) }) {
+            byte[] nonce = ChunkCipher.nonce(index);
+            assertArrayEquals(new byte[4], Arrays.copyOf(nonce, 4));
+            assertFalse(Arrays.equals(footerNonce, nonce));
+        }
     }
 
     public void testSizes() {
@@ -124,7 +141,8 @@ public class ChunkCipherKnownAnswerTests extends OpenSearchTestCase {
         Cipher cipher = ChunkCipher.newCipher();
         byte[] out = new byte[100 + ChunkCipher.TAG_LENGTH];
         ChunkCipher.seal(cipher, KEY, 7, PLAINTEXT, 0, 100, out);
-        expectThrows(Exception.class, () -> ChunkCipher.seal(cipher, KEY, 7, PLAINTEXT, 0, 100, out));
+        // SunJCE refuses key+IV reuse for GCM encryption ("Cannot reuse iv for GCM encryption").
+        expectThrows(InvalidAlgorithmParameterException.class, () -> ChunkCipher.seal(cipher, KEY, 7, PLAINTEXT, 0, 100, out));
     }
 
     public void testRejectsBadLengths() {

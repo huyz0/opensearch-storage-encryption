@@ -25,7 +25,10 @@ import org.opensearch.index.store.CryptoDirectoryFactory;
  * at a time, so any change to the ciphertext or the tags is detected before plaintext is returned.
  *
  * <p>The chunk index is part of the nonce, so moving a chunk to another position fails
- * authentication. The file key is unique per file, so nonces never repeat under one key.
+ * authentication. Nonces are deterministic, so a key must seal exactly one file: callers must use
+ * a fresh per-file key (HKDF over a random message ID), never the directory key. The footer auth
+ * tag uses nonce {@code FF x 8 || 00 x 4}, which no chunk nonce can equal because chunk nonces
+ * start with four zero bytes.
  *
  * @opensearch.internal
  */

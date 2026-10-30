@@ -49,7 +49,7 @@ public class BlockSlotTinyCache {
         }
     }
 
-    private record SlotEntry(long blockIdx, BlockCacheValue<RefCountedMemorySegment>val, int gen) {
+    private record SlotEntry(long blockIdx, BlockCacheValue<RefCountedMemorySegment> val, int gen) {
     }
 
     private static final int SLOT_COUNT = 32;
