@@ -368,8 +368,9 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         }
 
         // Copy keyfile from source to target: copy to a temp file, fsync it, then atomically
-        // rename it into place so a crash never leaves a partial keyfile behind
-        Path tempKeyfile = targetIndexDirectory.resolve("keyfile.resize.tmp");
+        // rename it into place so a crash never leaves a partial keyfile behind. The temp name is
+        // unique because several target shards may run this concurrently.
+        Path tempKeyfile = Files.createTempFile(targetIndexDirectory, "keyfile.resize.", ".tmp");
         try {
             Files.copy(sourceKeyfile, tempKeyfile, StandardCopyOption.REPLACE_EXISTING);
             IOUtils.fsync(tempKeyfile, false);
