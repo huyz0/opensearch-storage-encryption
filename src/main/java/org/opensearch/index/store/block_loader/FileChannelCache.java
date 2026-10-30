@@ -10,7 +10,6 @@ import java.nio.channels.FileChannel;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
 import java.util.concurrent.TimeUnit;
 
 import org.opensearch.index.store.metrics.CryptoMetricsService;
@@ -127,9 +126,9 @@ public class FileChannelCache implements Closeable {
             if (ref.channel().isOpen()) {
                 return ref;
             }
-            // A FileChannel closes itself when a thread blocked in I/O on it is interrupted
-            // (ClosedByInterruptException), even though other readers share it. Drop the dead
-            // entry so the next attempt opens a fresh channel instead of failing until eviction.
+            // Where the JDK FileChannel is used (no native access), a thread interrupted while reading
+            // closes the channel for every reader sharing it. Drop the dead entry so the next attempt
+            // opens a fresh channel instead of failing until eviction.
             ref.close();
             evictIfCurrent(normalizedPath, ref);
         }
@@ -214,13 +213,8 @@ public class FileChannelCache implements Closeable {
 
     private RefCountedChannel openChannel(String path) {
         try {
-            FileChannel fc;
-            if (directOpenOption != null) {
-                fc = FileChannel.open(Paths.get(path), StandardOpenOption.READ, directOpenOption);
-            } else {
-                fc = FileChannel.open(Paths.get(path), StandardOpenOption.READ);
-            }
-            return new RefCountedChannel(fc);
+            // Uninterruptible where supported, so an interrupted reader cannot close the shared channel
+            return new RefCountedChannel(NativeFileChannel.open(Paths.get(path), directOpenOption != null, directOpenOption));
         } catch (IOException e) {
             throw new RuntimeException("Failed to open FileChannel: " + path, e);
         }

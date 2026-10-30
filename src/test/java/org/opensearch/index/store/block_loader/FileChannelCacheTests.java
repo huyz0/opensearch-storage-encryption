@@ -6,7 +6,6 @@ package org.opensearch.index.store.block_loader;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.channels.ClosedByInterruptException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -970,33 +969,34 @@ public class FileChannelCacheTests extends OpenSearchTestCase {
     // ====================================================================
 
     /**
-     * FileChannel is interruptible: a thread interrupted while reading closes the channel for every
-     * thread that shares it. The cache must not keep handing out that dead channel.
+     * The JDK FileChannel is interruptible: a thread interrupted while reading closes the channel for
+     * every thread that shares it. Cached channels read natively, so an interrupt must leave the
+     * shared channel open and the reader's interrupt flag set.
      */
-    public void testAcquireReplacesChannelClosedByInterrupt() throws Exception {
+    public void testInterruptedReadLeavesSharedChannelOpen() throws Exception {
+        assumeTrue("native reads unavailable on this platform", NativeFileChannel.isAvailable());
         Path file = createTestFile();
         String path = file.toAbsolutePath().normalize().toString();
         FileChannelCache cache = new FileChannelCache(16, null);
 
-        FileChannel interrupted;
+        FileChannel shared;
         try (RefCountedChannel ref = cache.acquire(path)) {
-            interrupted = ref.channel();
+            shared = ref.channel();
             Thread.currentThread().interrupt();
             try {
-                expectThrows(ClosedByInterruptException.class, () -> interrupted.read(ByteBuffer.allocate(64), 0));
+                assertTrue(readAndValidate(shared, MAGIC));
             } finally {
                 assertTrue("interrupt flag should still be set", Thread.interrupted());
             }
         }
-        assertFalse(interrupted.isOpen());
+        assertTrue("an interrupt must not close the shared channel", shared.isOpen());
 
         try (RefCountedChannel ref = cache.acquire(path)) {
-            assertNotSame("a closed channel must not be served from the cache", interrupted, ref.channel());
-            assertTrue(ref.channel().isOpen());
+            assertSame(shared, ref.channel());
             assertTrue(readAndValidate(ref.channel(), MAGIC));
         }
-        assertEquals(1, cache.estimatedSize());
         cache.close();
+        assertFalse(shared.isOpen());
     }
 
     /**
@@ -1009,7 +1009,7 @@ public class FileChannelCacheTests extends OpenSearchTestCase {
         FileChannelCache cache = new FileChannelCache(16, null);
 
         RefCountedChannel stale = cache.acquire(path);
-        stale.channel().close(); // what an interrupt does to the shared channel
+        stale.channel().close(); // what an interrupt does to a JDK FileChannel
 
         FileChannel fresh;
         try (RefCountedChannel ref = cache.acquire(path)) {
