@@ -250,7 +250,7 @@ node.store.crypto.key_expiry_interval: 24h
 ### Key Management
 - **Master Key**: held by the master key provider (for example AWS KMS) and never written to disk
 - **Data Keys**: wrapped by the master key and stored in `indices/<index-uuid>/keyfile` on each node that holds a copy of the index
-- **Key Health**: `MasterKeyHealthMonitor` refreshes data keys (default every hour) and applies read/write blocks to affected indices when the master key becomes unavailable
+- **Key Health**: `MasterKeyHealthMonitor` refreshes data keys (default every hour) and applies read/write blocks to affected indices when the master key becomes unavailable. It records the blocks it applied in `index.store.crypto.health_monitor_blocks` and removes only those on recovery, so shrink write blocks and operator-set blocks are left in place
 - **Rotation**: data key rotation and re-encryption are not implemented
 
 ## Testing
@@ -376,11 +376,10 @@ The plugin has no release yet and is not ready for production use. The items bel
 
 ### Known data-correctness bugs
 Still open:
-- **Reads past the end of a slice in `BufferPoolDirectory`.** `CachedMemorySegmentIndexInput` has no EOF or slice-bounds checks on positional reads, so a read past a compound-file slice returns neighbouring bytes instead of failing.
 - **Block pool exhaustion.** A cache miss can wait up to 5 seconds for a free block while holding a cache lock, which can stall searches node-wide under memory pressure.
 - **Interrupted threads close shared file channels.** An interrupt during a block read closes the node-wide cached `FileChannel`, and later loads of that file fail until it is evicted.
 
-Fixed on `main`: the L2 block cache lookup/recycle race that could return another block's plaintext, encrypted translog reads returning 0 instead of -1 at end of data, wrong plaintext for buffer-pool reads that cross a 32 GiB frame boundary, NIOFS input clones closing the shared file channel, the shared read-ahead worker being stopped when any one directory closed, and keyfiles written without fsync or atomic rename.
+Fixed on `main`: the L2 block cache lookup/recycle race that could return another block's plaintext, encrypted translog reads returning 0 instead of -1 at end of data, wrong plaintext for buffer-pool reads that cross a 32 GiB frame boundary, missing EOF and slice-bounds checks in `CachedMemorySegmentIndexInput` (reads past a compound-file slice returned neighbouring bytes), NIOFS input clones closing the shared file channel, the shared read-ahead worker being stopped when any one directory closed, and keyfiles written without fsync or atomic rename.
 
 ### What is not encrypted
 - `segments_N`, `pending_segments_N` and `.si` files, kept plaintext on purpose because core's `Store` opens them with a plain `NIOFSDirectory`; also `write.lock`
