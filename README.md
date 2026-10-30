@@ -4,7 +4,7 @@ A high-performance OpenSearch plugin that provides transparent, on-the-fly encry
 
 ## Features
 
-The plugin provides transparent on-the-fly encryption and decryption at the Lucene Directory level. It offers two encrypted directory implementations: an NIO-based directory (`CryptoNIOFSDirectory`) and a buffer-pool directory (`BufferPoolDirectory`) that reads with O_DIRECT and keeps decrypted blocks in an off-heap cache. `HybridCryptoDirectory` routes each file to one of the two by extension. Both encrypt every file they write.
+The plugin provides transparent on-the-fly encryption and decryption at the Lucene Directory level. It offers two encrypted directory implementations: an NIO-based directory (`CryptoNIOFSDirectory`) and a buffer-pool directory (`BufferPoolDirectory`) that reads with O_DIRECT and keeps decrypted blocks in an off-heap cache. `HybridCryptoDirectory` routes each file to one of the two by extension. Both encrypt every file they write except `segments_N`, `pending_segments_N` and `.si`, which stay plaintext (see [What is not encrypted](#what-is-not-encrypted)).
 
 Performance is optimized through a Caffeine-based block cache, read-ahead prefetching for sequential access patterns, and pooled off-heap memory segments. Writes use AES-256-GCM through OpenSSL (called via the Panama foreign function API); reads use the JDK's AES-CTR.
 
@@ -94,7 +94,7 @@ Efficient memory management is achieved through `MemorySegmentPool`, which provi
 - **JDK**: 25
 - **OpenSearch**: 3.6.0 (the build targets `3.6.0-SNAPSHOT` by default)
 - **Master Key Provider**: a key provider plugin, such as OpenSearch's `crypto-kms` plugin for AWS KMS
-- **Operating System**: Linux on x86_64. OpenSSL's `libcrypto` must be in `/lib64` or `/lib`, which RHEL-family and Amazon Linux provide; Debian and Ubuntu keep it under `/usr/lib/<arch>-linux-gnu` and are not supported yet. Other platforms and ARM are not tested in CI.
+- **Operating System**: Linux on x86_64 or aarch64 with OpenSSL's `libcrypto` installed. The plugin looks in `/lib64`, `/usr/lib64`, `/lib`, `/usr/lib/<multiarch triplet>` (Debian/Ubuntu) and `/usr/lib`. CI runs on x86_64 only; aarch64 is not tested in CI. Other operating systems are not supported.
 
 ## Installation
 
@@ -213,8 +213,8 @@ Configure in `opensearch.yml`:
 | `node.store.crypto.pool_size_percentage` | Memory pool size as percentage of off-heap memory| Double | `0.0` - `1.0` |
 | `node.store.crypto.cache_to_pool_ratio` | Cache size as ratio of pool size (cache = pool × ratio) | Double | `0.1` - `1.0` |
 | `node.store.crypto.warmup_percentage` | Percentage of cache blocks to warmup at initialization | Double | `0.0` - `1.0` |
-| `node.store.crypto.key_refresh_interval` | Interval for refreshing data keys from KMS | TimeValue | `-1` (never) or positive duration |
-| `node.store.crypto.key_expiry_interval` | Expiration time for keys after refresh failures | TimeValue | `-1` (never) or positive duration |
+| `node.store.crypto.key_refresh_interval` | Interval for refreshing data keys from KMS | TimeValue | default `1h`, minimum `1s` |
+| `node.store.crypto.key_expiry_interval` | Expiration time for keys after refresh failures | TimeValue | default `24h`; `-1` (never) or positive duration |
 | `node.store.crypto.allow_dummy_key_provider` | Allow indices to use the `dummy` key provider, which stores the data key in plaintext. **For tests only** | Boolean | `false` (default) or `true` |
 | `node.store.crypto.write_cache_enabled` | Cache blocks in the block cache as they are written (dynamic) | Boolean | default `true` |
 | `node.store.crypto.max_file_channels` | Maximum open file channels in the node-wide channel cache | Integer | default `256`, minimum `1` |
@@ -223,7 +223,7 @@ Configure in `opensearch.yml`:
 **Time Value Format:**
 - Supported units: `s` (seconds), `m` (minutes), `h` (hours), `d` (days)
 - Examples: `30s`, `5m`, `1h`, `24h`
-- Special value: `-1` disables refresh/expiry
+- Special value: `-1` disables key expiry (`key_expiry_interval` only)
 
 **Memory Configuration Notes:**
 - Pool size is calculated as: `max(256 MB, (Total Physical Memory - Max Heap) × pool_size_percentage)`, default percentage `0.3`
@@ -363,15 +363,24 @@ The plugin has no release yet and is not ready for production use. The items bel
 ### Known security issues
 - **Translog nonce reuse.** Every translog chunk of a shard is encrypted with the same AES-GCM key and nonce. Anyone who can read the translog files can recover the XOR of two document sources and forge translog content. Treat translog contents as unprotected against disk access until this is fixed (upstream [PR #181](https://github.com/opensearch-project/opensearch-storage-encryption/pull/181)).
 - **Unauthenticated reads.** Lucene file contents are read with AES-CTR and the GCM tags are never checked. Someone with write access to the disk can flip chosen plaintext bits without detection.
-- **`dummy` key provider.** It can be set on any index and stores the data key in plaintext next to the data. Restrict it with index templates or policy.
 - **Footer not bound to its file.** The footer does not include the index, shard or file name, so swapping or rolling back whole files is not detected.
 
 ### Durability and availability
 - The translog's last GCM tag is written only when the file is closed. After a crash or `kill -9`, up to 8 KB of acknowledged operations per translog generation cannot be decrypted, and realtime GET or `_update` of unrefreshed documents can fail. Keep at least one replica.
-- The keyfile is written without fsync or an atomic rename. If a node crashes right after creating an index, its copy can become undecryptable.
-- Segment replication and remote-store failover, promotion and restore do not work with encrypted indices.
+- Remote-store translog failover, promotion and restore do not work with encrypted indices: the remote translog is uploaded decrypted but read back through the decrypting channel. Segment-replication replicas work.
 - KMS encryption context is recomputed from repository settings each time a shard opens. Changing repositories can make an index unopenable.
 - A revoked or unavailable master key is not enforced immediately: cached data keys keep working for up to `node.store.crypto.key_expiry_interval` (default 24 hours).
+
+### Upgrading
+- The `dummy` key provider is now rejected unless `node.store.crypto.allow_dummy_key_provider: true` is set. Existing indices that use `dummy` will not open, and their shards stay unassigned (red), on nodes without that setting. Move that data to an index with a real key provider before upgrading, or set the flag on test clusters only.
+
+### Known data-correctness bugs
+Still open:
+- **Reads past the end of a slice in `BufferPoolDirectory`.** `CachedMemorySegmentIndexInput` has no EOF or slice-bounds checks on positional reads, so a read past a compound-file slice returns neighbouring bytes instead of failing.
+- **Block pool exhaustion.** A cache miss can wait up to 5 seconds for a free block while holding a cache lock, which can stall searches node-wide under memory pressure.
+- **Interrupted threads close shared file channels.** An interrupt during a block read closes the node-wide cached `FileChannel`, and later loads of that file fail until it is evicted.
+
+Fixed on `main`: the L2 block cache lookup/recycle race that could return another block's plaintext, encrypted translog reads returning 0 instead of -1 at end of data, wrong plaintext for buffer-pool reads that cross a 32 GiB frame boundary, NIOFS input clones closing the shared file channel, the shared read-ahead worker being stopped when any one directory closed, and keyfiles written without fsync or atomic rename.
 
 ### What is not encrypted
 - `segments_N`, `pending_segments_N` and `.si` files, kept plaintext on purpose because core's `Store` opens them with a plain `NIOFSDirectory`; also `write.lock`
@@ -385,7 +394,7 @@ The plugin has no release yet and is not ready for production use. The items bel
 
 ### Platform and features
 - Only AWS KMS is supported as a master key provider
-- Linux x86_64 with `libcrypto` in `/lib64` or `/lib` only (see [Requirements](#requirements))
+- Linux only, x86_64 or aarch64 (see [Requirements](#requirements)); aarch64 is not covered by CI
 - No key rotation or re-encryption
 - Pinned timestamps (snapshot v2) are not supported
 - Reads through `BufferPoolDirectory` bypass the page cache, so indices larger than the block cache read from disk more often than with `mmapfs`
