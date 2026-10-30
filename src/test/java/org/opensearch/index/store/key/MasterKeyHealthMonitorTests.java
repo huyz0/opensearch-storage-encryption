@@ -18,6 +18,10 @@ import static org.mockito.Mockito.when;
 import java.lang.reflect.Field;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.After;
 import org.junit.Before;
@@ -118,6 +122,39 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         return tracker;
     }
 
+    @SuppressForbidden(reason = "Test needs to access private block update executor")
+    private ExecutorService blockUpdateExecutor() throws Exception {
+        Field executorField = MasterKeyHealthMonitor.class.getDeclaredField("blockUpdateExecutor");
+        executorField.setAccessible(true);
+        return (ExecutorService) executorField.get(monitor);
+    }
+
+    /**
+     * Waits for the block updates that reportFailure and reportSuccess hand to the block update thread
+     */
+    private void drainBlockUpdates() throws Exception {
+        blockUpdateExecutor().submit(() -> {}).get(10, TimeUnit.SECONDS);
+    }
+
+    /**
+     * Holds the block update thread until the returned latch is counted down, so tests can change
+     * the failure state while a block update is queued
+     */
+    private CountDownLatch holdBlockUpdates() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch started = new CountDownLatch(1);
+        blockUpdateExecutor().execute(() -> {
+            started.countDown();
+            try {
+                release.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        assertTrue(started.await(10, TimeUnit.SECONDS));
+        return release;
+    }
+
     /**
      * Transient errors (THROTTLING) should NOT apply blocks
      */
@@ -131,6 +168,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, transientError, FailureType.TRANSIENT);
 
         // Assert: No blocks applied
+        drainBlockUpdates();
         verify(mockIndicesAdminClient, never()).updateSettings(any());
 
         // Verify failure tracked but blocksApplied=false
@@ -178,6 +216,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         Thread.sleep(100);
 
         // Assert: Still no blocks
+        drainBlockUpdates();
         verify(mockIndicesAdminClient, never()).updateSettings(any());
 
         ConcurrentHashMap<String, FailureState> tracker = getFailureTracker();
@@ -255,6 +294,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         Thread.sleep(100);
 
         // Assert: No block operations since no blocks to remove
+        drainBlockUpdates();
         verify(mockIndicesAdminClient, never()).updateSettings(any());
 
         // Verify failure tracker cleared
@@ -433,6 +473,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         Thread.sleep(100);
 
         // Assert: No blocks applied (transient errors don't trigger blocks)
+        drainBlockUpdates();
         verify(mockIndicesAdminClient, never()).updateSettings(any());
 
         ConcurrentHashMap<String, FailureState> tracker = getFailureTracker();
@@ -505,21 +546,24 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         assertEquals("Wrapped DisabledException should be classified as CRITICAL", FailureType.CRITICAL, type);
     }
 
-    private List<UpdateSettingsRequest> capturedUpdateRequests() {
+    private List<UpdateSettingsRequest> capturedUpdateRequests() throws Exception {
+        drainBlockUpdates();
         ArgumentCaptor<UpdateSettingsRequest> captor = ArgumentCaptor.forClass(UpdateSettingsRequest.class);
         verify(mockIndicesAdminClient, atLeastOnce()).updateSettings(captor.capture());
         return captor.getAllValues();
     }
 
     @SuppressWarnings("unchecked")
-    private UpdateSettingsRequest capturedRemovalRequest() {
+    private UpdateSettingsRequest capturedRemovalRequest() throws Exception {
+        drainBlockUpdates();
         ArgumentCaptor<UpdateSettingsRequest> captor = ArgumentCaptor.forClass(UpdateSettingsRequest.class);
         verify(mockIndicesAdminClient).updateSettings(captor.capture(), any(ActionListener.class));
         return captor.getValue();
     }
 
     @SuppressWarnings("unchecked")
-    private void verifyNoRemoval() {
+    private void verifyNoRemoval() throws Exception {
+        drainBlockUpdates();
         verify(mockIndicesAdminClient, never()).updateSettings(any(), any(ActionListener.class));
     }
 
@@ -586,6 +630,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
 
         monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
 
+        drainBlockUpdates();
         verify(mockIndicesAdminClient, never()).updateSettings(any());
         verifyNoRemoval();
     }
@@ -599,6 +644,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
 
         monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
 
+        drainBlockUpdates();
         verify(mockIndicesAdminClient, never()).updateSettings(any());
         verifyNoRemoval();
     }
@@ -612,6 +658,7 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         when(mockIndexMetadata.getSettings())
             .thenReturn(Settings.builder().put("index.blocks.write", true).putList(OWNED, "write").build());
         monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+        drainBlockUpdates();
         verify(mockIndicesAdminClient, never()).updateSettings(any());
 
         // That node recovers and removes the block; this node is still failing
@@ -622,6 +669,73 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         assertEquals(1, requests.size());
         assertEquals("true", requests.get(0).settings().get("index.blocks.write"));
         assertEquals(List.of("write"), requests.get(0).settings().getAsList(OWNED));
+    }
+
+    /**
+     * Key loads run on the cluster applier thread during shard creation, where reading the cluster
+     * state trips an assertion that kills the applier task. Reporting must not read it on the caller's thread.
+     */
+    public void testReportingDoesNotReadClusterStateOnCallerThread() throws Exception {
+        Thread caller = Thread.currentThread();
+        List<Thread> readers = new CopyOnWriteArrayList<>();
+        when(mockClusterService.state()).thenAnswer(invocation -> {
+            readers.add(Thread.currentThread());
+            return mockClusterState;
+        });
+        when(mockIndexMetadata.getSettings())
+            .thenReturn(Settings.builder().put("index.blocks.write", true).putList(OWNED, "write").build());
+
+        monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
+        monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+        drainBlockUpdates();
+
+        assertFalse("Cluster state should be read on the block update thread", readers.isEmpty());
+        assertFalse("Cluster state must not be read on the reporting thread", readers.contains(caller));
+    }
+
+    /**
+     * A removal queued by a recovery is dropped if a critical failure is reported before it runs
+     */
+    public void testQueuedRemovalSkippedAfterCriticalFailure() throws Exception {
+        when(mockIndexMetadata.getSettings())
+            .thenReturn(Settings.builder().put("index.blocks.write", true).putList(OWNED, "write").build());
+
+        CountDownLatch release = holdBlockUpdates();
+        monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
+        monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+        release.countDown();
+
+        verifyNoRemoval();
+    }
+
+    /**
+     * A transient failure (throttling) reported before a queued removal runs doesn't keep the blocks up
+     */
+    public void testQueuedRemovalRunsAfterTransientFailure() throws Exception {
+        when(mockIndexMetadata.getSettings())
+            .thenReturn(Settings.builder().put("index.blocks.write", true).putList(OWNED, "write").build());
+
+        CountDownLatch release = holdBlockUpdates();
+        monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
+        monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("ThrottlingException"), FailureType.TRANSIENT);
+        release.countDown();
+
+        assertTrue(capturedRemovalRequest().settings().keySet().contains("index.blocks.write"));
+    }
+
+    /**
+     * A block queued by a critical failure is not applied if the index recovers before it runs
+     */
+    public void testQueuedApplySkippedAfterRecovery() throws Exception {
+        when(mockIndexMetadata.getSettings()).thenReturn(Settings.EMPTY);
+
+        CountDownLatch release = holdBlockUpdates();
+        monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+        monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
+        release.countDown();
+
+        drainBlockUpdates();
+        verify(mockIndicesAdminClient, never()).updateSettings(any());
     }
 
     public void testOwnershipSettingIsDynamicIndexSetting() {

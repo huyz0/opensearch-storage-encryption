@@ -262,6 +262,8 @@ public class CryptoDirectoryEncryptionTests extends OpenSearchTestCase {
 
         // Reset the NodeLevelKeyCache singleton to prevent test pollution
         NodeLevelKeyCache.reset();
+        // Stop the health monitor thread that key loads start
+        MasterKeyHealthMonitor.reset();
         // Clear the ShardKeyResolverRegistry cache
         ShardKeyResolverRegistry.clearCache();
         super.tearDown();
