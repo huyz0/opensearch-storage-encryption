@@ -96,8 +96,9 @@ public class FileChannelCache implements Closeable {
      * has already been acquired (refCount incremented) and MUST be closed when
      * done, typically via try-with-resources.
      *
-     * <p>If the cached entry was concurrently evicted (stale), this method
-     * transparently evicts the stale entry and retries up to {@link #MAX_ACQUIRE_RETRIES} times.
+     * <p>If the cached entry was concurrently evicted (stale), or its FileChannel was closed
+     * because a thread reading from it was interrupted, this method transparently evicts the
+     * entry and retries up to {@link #MAX_ACQUIRE_RETRIES} times.
      *
      * @param normalizedPath the absolute normalized file path
      * @return an acquired RefCountedChannel — never null
@@ -117,7 +118,7 @@ public class FileChannelCache implements Closeable {
                 throw e;
             }
             try {
-                return ref.acquire();
+                ref.acquire();
             } catch (IllegalStateException e) {
                 // Stale entry — evict and release its base ref to close the FD.
                 // asMap().remove(key, value) is a conditional remove — only removes
@@ -126,6 +127,17 @@ public class FileChannelCache implements Closeable {
                 if (fdCache.asMap().remove(normalizedPath, ref)) {
                     ref.releaseBase();
                 }
+                continue;
+            }
+            if (ref.channel().isOpen()) {
+                return ref;
+            }
+            // A FileChannel closes itself when a thread blocked in I/O on it is interrupted
+            // (ClosedByInterruptException), even though other readers share it. Drop the dead
+            // entry so the next attempt opens a fresh channel instead of failing until eviction.
+            ref.close();
+            if (fdCache.asMap().remove(normalizedPath, ref)) {
+                ref.releaseBase();
             }
         }
         throw new IOException("Failed to acquire FileChannel after " + MAX_ACQUIRE_RETRIES + " retries: " + normalizedPath);

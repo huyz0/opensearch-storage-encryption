@@ -13,6 +13,8 @@ import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
+import java.nio.channels.ClosedByInterruptException;
+import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
@@ -96,8 +98,8 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         long readLength = blockCount << CACHE_BLOCK_SIZE_POWER;
         String normalizedPath = filePath.toAbsolutePath().normalize().toString();
 
-        try (Arena arena = Arena.ofConfined(); RefCountedChannel ref = fileChannelCache.acquire(normalizedPath)) {
-            MemorySegment readBytes = directIOReadAligned(ref.channel(), filePath, startOffset, readLength, arena);
+        try (Arena arena = Arena.ofConfined()) {
+            MemorySegment readBytes = readAligned(normalizedPath, filePath, startOffset, readLength, arena);
             long bytesRead = readBytes.byteSize();
 
             byte[] masterKey = keyResolver.getDataKey().getEncoded();
@@ -161,6 +163,27 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         } catch (Exception e) {
             LOGGER.error("Bulk read failed: path={} offset={} length={} err={}", filePath, startOffset, readLength, e.toString());
             throw e;
+        }
+    }
+
+    /**
+     * Reads through the shared cached channel. Another thread that is interrupted while reading the
+     * same file closes the channel for everyone (FileChannel is interruptible), which surfaces here as
+     * {@link java.nio.channels.AsynchronousCloseException}. That is not this reader's failure, so retry once on a fresh
+     * channel. If this thread was the one interrupted, propagate the exception.
+     */
+    private MemorySegment readAligned(String normalizedPath, Path filePath, long startOffset, long readLength, Arena arena)
+        throws IOException {
+        try (RefCountedChannel ref = fileChannelCache.acquire(normalizedPath)) {
+            return directIOReadAligned(ref.channel(), filePath, startOffset, readLength, arena);
+        } catch (ClosedChannelException e) {
+            if (e instanceof ClosedByInterruptException || Thread.currentThread().isInterrupted()) {
+                throw e;
+            }
+            // acquire() drops the closed channel from the cache and opens a new one
+            try (RefCountedChannel ref = fileChannelCache.acquire(normalizedPath)) {
+                return directIOReadAligned(ref.channel(), filePath, startOffset, readLength, arena);
+            }
         }
     }
 
