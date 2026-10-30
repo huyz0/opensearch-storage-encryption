@@ -291,4 +291,33 @@ public class CryptoDirectoryTests extends OpenSearchBaseDirectoryTestCase {
             CryptoDirectoryPlugin.CRYPTO_PLUGIN_ENABLED_SETTING.getDefault(org.opensearch.common.settings.Settings.EMPTY)
         );
     }
+
+    /**
+     * Closing a clone must not close the FileChannel it shares with the original input (#178).
+     * Clones are closed freely by Lucene, so the original has to keep reading afterwards.
+     */
+    public void testClosingCloneDoesNotCloseSharedChannel() throws IOException {
+        try (Directory dir = getDirectory(createTempDir())) {
+            // Several buffers' worth, so later reads have to go back to the channel.
+            byte[] data = new byte[64 * 1024];
+            random().nextBytes(data);
+            try (IndexOutput out = dir.createOutput("clone-close", newIOContext(random()))) {
+                out.writeBytes(data, data.length);
+            }
+
+            try (IndexInput in = dir.openInput("clone-close", newIOContext(random()))) {
+                IndexInput clone = in.clone();
+                assertEquals(in.length(), clone.length());
+                assertEquals(data[0], clone.readByte());
+                clone.close();
+
+                IndexInput sliceOfClone = in.clone().slice("slice", 1024, 4096);
+                sliceOfClone.close();
+
+                byte[] read = new byte[data.length];
+                in.readBytes(read, 0, read.length);
+                assertArrayEquals(data, read);
+            }
+        }
+    }
 }

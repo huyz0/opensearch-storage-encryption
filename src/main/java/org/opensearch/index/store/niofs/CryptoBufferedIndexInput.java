@@ -43,6 +43,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
     private final FileChannel channel;
     private final boolean isClone;
+    /** Only the input that opened the channel closes it; clones and slices share it. */
+    private boolean ownsChannel;
     private final long off;
     private final long end;
     private final KeyResolver keyResolver;
@@ -74,6 +76,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.end = fc.size();
         this.keyResolver = keyResolver;
         this.isClone = false;
+        this.ownsChannel = true;
         this.normalizedFilePath = EncryptionMetadataCache.normalizePath(filePath);
         this.encryptionMetadataCache = encryptionMetadataCache;
 
@@ -118,6 +121,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.off = off;
         this.end = off + length;
         this.isClone = true;
+        this.ownsChannel = false;
         this.keyResolver = keyResolver;
         this.keySpec = keySpec;  // Reuse keySpec from main file
         this.footerLength = footerLength;
@@ -132,7 +136,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
     @Override
     public void close() throws IOException {
-        if (!isClone) {
+        if (ownsChannel) {
             channel.close();
         }
     }
@@ -140,6 +144,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     @Override
     public CryptoBufferedIndexInput clone() {
         CryptoBufferedIndexInput clone = (CryptoBufferedIndexInput) super.clone();
+        clone.ownsChannel = false;
         clone.tmpBuffer = EMPTY_BYTEBUFFER;
         return clone;
     }
