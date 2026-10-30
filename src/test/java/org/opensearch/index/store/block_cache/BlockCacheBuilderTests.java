@@ -39,10 +39,8 @@ public class BlockCacheBuilderTests extends OpenSearchTestCase {
         super.setUp();
         CryptoMetricsService.initialize(mock(MetricsRegistry.class));
         pool = new MemorySegmentPool((long) POOL_SEGMENTS * SEGMENT_SIZE, SEGMENT_SIZE);
-        BlockCacheBuilder.CacheWithExecutor<RefCountedMemorySegment, RefCountedMemorySegment> built = BlockCacheBuilder
-            .build(16, POOL_SEGMENTS / 2);
-        assertNull("removals are synchronous, so there is no executor to shut down", built.getExecutor());
-        cache = built.getCache().getCache();
+        CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment> built = BlockCacheBuilder.build(16, POOL_SEGMENTS / 2);
+        cache = built.getCache();
     }
 
     @Override
@@ -68,7 +66,11 @@ public class BlockCacheBuilderTests extends OpenSearchTestCase {
 
         cache.invalidate(key(0));
 
-        assertEquals("the segment must be back in the pool when invalidate() returns", before + SEGMENT_SIZE, pool.availableMemoryAccurate());
+        assertEquals(
+            "the segment must be back in the pool when invalidate() returns",
+            before + SEGMENT_SIZE,
+            pool.availableMemoryAccurate()
+        );
     }
 
     public void testSizeEvictionReturnsSegmentToPoolBeforeReturning() throws Exception {
