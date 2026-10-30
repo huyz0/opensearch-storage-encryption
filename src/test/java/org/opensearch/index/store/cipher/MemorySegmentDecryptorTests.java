@@ -317,4 +317,100 @@ public class MemorySegmentDecryptorTests extends OpenSearchTestCase {
 
         assertArrayEquals(testData, decrypted);
     }
+
+    /**
+     * Decrypting a sub-range must match the same bytes of a whole-stream encryption, for every
+     * offset within an AES block. An off-by-mask bug in the arena overload skipped the keystream
+     * advance whenever offset % 16 was 4, 8 or 12.
+     */
+    public void testAllEntryPointsDecryptAnySubrangeAtEveryBlockAlignment() throws Exception {
+        byte[] plain = new byte[256];
+        new SecureRandom().nextBytes(plain);
+        byte[] encrypted = encryptFromStart(plain, TEST_KEY, TEST_IV);
+
+        for (int offset = 0; offset < 48; offset++) {
+            int length = 64 + (offset % 7);
+            byte[] expected = Arrays.copyOfRange(plain, offset, offset + length);
+
+            MemorySegment a = copyOf(encrypted, offset, length);
+            MemorySegmentDecryptor.decryptInPlace(arena, a.address(), length, TEST_KEY, TEST_IV, offset);
+            assertArrayEquals("arena overload, offset " + offset, expected, toBytes(a));
+
+            MemorySegment b = copyOf(encrypted, offset, length);
+            MemorySegmentDecryptor.decryptInPlace(b.address(), length, TEST_KEY, TEST_IV, offset);
+            assertArrayEquals("global overload, offset " + offset, expected, toBytes(b));
+
+            MemorySegment c = copyOf(encrypted, offset, length);
+            MemorySegmentDecryptor.decryptSegment(c, offset, TEST_KEY, TEST_IV, length);
+            assertArrayEquals("decryptSegment, offset " + offset, expected, toBytes(c));
+        }
+    }
+
+    /**
+     * A read that crosses a frame boundary must decrypt each part with the frame-relative offset,
+     * exactly like a read that stays inside one frame. Uses a tiny frame size so the slow path runs
+     * without multi-GiB files.
+     */
+    public void testFrameBasedDecryptionAcrossFrameBoundaries() throws Exception {
+        final long frameSize = 64;
+        final int fileLength = 4 * (int) frameSize;
+        byte[] directoryKey = new byte[32];
+        byte[] messageId = new byte[16];
+        new SecureRandom().nextBytes(directoryKey);
+        new SecureRandom().nextBytes(messageId);
+        String filePath = "/test/frames.dat";
+        EncryptionMetadataCache cache = new EncryptionMetadataCache();
+
+        // Each frame is an independent CTR stream starting at its own frame IV.
+        byte[] plain = new byte[fileLength];
+        new SecureRandom().nextBytes(plain);
+        byte[] encrypted = new byte[fileLength];
+        for (int frame = 0; frame * frameSize < fileLength; frame++) {
+            byte[] frameIV = AesCipherFactory.computeFrameIV(directoryKey, messageId, frame, 0, filePath, cache);
+            int start = (int) (frame * frameSize);
+            byte[] framePlain = Arrays.copyOfRange(plain, start, start + (int) frameSize);
+            System.arraycopy(encryptFromStart(framePlain, TEST_KEY, frameIV), 0, encrypted, start, (int) frameSize);
+        }
+
+        int[][] ranges = {
+            { 0, fileLength },        // whole file, every frame
+            { 60, 8 },                // straddles frame 0/1, unaligned
+            { 64, 64 },               // exactly frame 1
+            { 100, 100 },             // frame 1 into frame 3
+            { 120, 20 },              // offset % 16 == 8 inside frame 1, crosses into frame 2
+            { 191, 2 } };             // one byte on each side of the frame 2/3 boundary
+        for (int[] range : ranges) {
+            int offset = range[0];
+            int length = range[1];
+            MemorySegment segment = copyOf(encrypted, offset, length);
+            MemorySegmentDecryptor
+                .decryptInPlaceFrameBased(segment.address(), length, TEST_KEY, directoryKey, messageId, frameSize, offset, filePath, cache);
+            assertArrayEquals(
+                "range [" + offset + ", " + (offset + length) + ")",
+                Arrays.copyOfRange(plain, offset, offset + length),
+                toBytes(segment)
+            );
+        }
+    }
+
+    private static byte[] encryptFromStart(byte[] plain, byte[] key, byte[] iv) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
+        cipher
+            .init(
+                Cipher.ENCRYPT_MODE,
+                new SecretKeySpec(key, "AES"),
+                new IvParameterSpec(AesCipherFactory.computeOffsetIVForAesGcmEncrypted(iv, 0))
+            );
+        return cipher.doFinal(plain);
+    }
+
+    private MemorySegment copyOf(byte[] source, int offset, int length) {
+        MemorySegment segment = arena.allocate(length);
+        MemorySegment.copy(source, offset, segment, ValueLayout.JAVA_BYTE, 0, length);
+        return segment;
+    }
+
+    private static byte[] toBytes(MemorySegment segment) {
+        return segment.toArray(ValueLayout.JAVA_BYTE);
+    }
 }
