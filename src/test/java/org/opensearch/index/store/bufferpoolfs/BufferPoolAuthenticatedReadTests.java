@@ -32,6 +32,7 @@ import org.opensearch.index.store.block.RefCountedMemorySegment;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.CaffeineBlockCache;
 import org.opensearch.index.store.block_loader.BlockLoader;
+import org.opensearch.index.store.block_loader.ChunkTagCache;
 import org.opensearch.index.store.block_loader.CryptoDirectIOBlockLoader;
 import org.opensearch.index.store.cipher.ChunkCipher;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
@@ -59,6 +60,7 @@ public class BufferPoolAuthenticatedReadTests extends OpenSearchTestCase {
     private EncryptionMetadataCache encryptionMetadataCache;
     private BufferPoolDirectory directory;
     private BlockLoader<RefCountedMemorySegment> loader;
+    private ChunkTagCache tagCache;
     private PoolBuilder.PoolResources poolResources;
     private boolean originalWriteCacheEnabled;
 
@@ -88,7 +90,14 @@ public class BufferPoolAuthenticatedReadTests extends OpenSearchTestCase {
         keyResolver = new TestKeyResolver(indexUuid, indexName, FSDirectory.open(path), provider, keyProvider, 0);
         encryptionMetadataCache = EncryptionMetadataCacheRegistry.getOrCreateCache(indexUuid, 0, indexName);
 
-        loader = new CryptoDirectIOBlockLoader(segmentPool, keyResolver, encryptionMetadataCache, poolResources.getFileChannelCache());
+        tagCache = new ChunkTagCache(ChunkTagCache.DEFAULT_MAX_BYTES);
+        loader = new CryptoDirectIOBlockLoader(
+            segmentPool,
+            keyResolver,
+            encryptionMetadataCache,
+            poolResources.getFileChannelCache(),
+            tagCache
+        );
         @SuppressWarnings("unchecked")
         CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment> sharedCache =
             (CaffeineBlockCache<RefCountedMemorySegment, RefCountedMemorySegment>) poolResources.getBlockCache();
@@ -211,6 +220,21 @@ public class BufferPoolAuthenticatedReadTests extends OpenSearchTestCase {
         flipBit("_7.tim", size - randomIntBetween(1, 40));
         encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(file));
         expectThrows(IOException.class, () -> loader.load(file, 0, 1, 1000));
+    }
+
+    public void testMissesInOneFileShareTagPages() throws Exception {
+        byte[] data = randomByteArrayOfLength(3 * CHUNK + 10);
+        write("_8.tim", data);
+        Path file = path.resolve("_8.tim");
+        for (int chunk : new int[] { 0, 3, 1 }) {
+            RefCountedMemorySegment[] blocks = loader.load(file, (long) chunk * CHUNK, 1, 1000);
+            try {
+                assertEquals(data[chunk * CHUNK], blocks[0].segment().get(ValueLayout.JAVA_BYTE, 0));
+            } finally {
+                blocks[0].close();
+            }
+            assertEquals("all of this file's tags fit in one page", 1, tagCache.estimatedSize());
+        }
     }
 
     private void assertChunkCorrupt(String name, int chunk, byte[] data) throws Exception {
