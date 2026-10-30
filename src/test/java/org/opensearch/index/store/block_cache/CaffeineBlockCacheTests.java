@@ -175,12 +175,13 @@ public class CaffeineBlockCacheTests extends OpenSearchTestCase {
             50
         );
 
-        expectThrows(Exception.class, () -> shortBudget.getOrLoad(key));
-        verify(mockLoader, org.mockito.Mockito.atLeast(2)).load(key);
+        expectThrows(BlockLoader.PoolAcquireFailedException.class, () -> shortBudget.getOrLoad(key));
+        verify(mockLoader, times(1)).load(key);
+        verify(mockLoader, times(1)).reservePoolSegment(anyLong());
     }
 
     /**
-     * A pool-acquire failure is retried outside the cache's lock after evicting the coldest entries.
+     * A pool-acquire failure evicts the coldest entries, waits for a segment outside the cache's lock, and loads again.
      */
     public void testGetOrLoadRetriesPoolAcquireFailureAfterEvictingColdEntries() throws Exception {
         BlockCacheKey cold = new FileBlockCacheKey(Paths.get("/test/file.dat"), 0L);
@@ -189,9 +190,30 @@ public class CaffeineBlockCacheTests extends OpenSearchTestCase {
         blockCache.put(cold, createMockValue("cold"));
 
         when(mockLoader.load(key)).thenThrow(new BlockLoader.PoolAcquireFailedException("Acquire timeout")).thenReturn(value);
+        when(mockLoader.reservePoolSegment(anyLong())).thenReturn(true);
+        when(mockLoader.poolExhausted()).thenReturn(true);
 
         assertSame(value, blockCache.getOrLoad(key));
         assertNull("coldest entry should be evicted to free pool space", blockCache.get(cold));
+        verify(mockLoader, times(2)).load(key);
+    }
+
+    /**
+     * A load also fails when it only queued behind other waiters while segments were free. Evicting
+     * then would free nothing that is needed, so the miss just waits its turn.
+     */
+    public void testGetOrLoadDoesNotEvictWhenPoolHasFreeSegments() throws Exception {
+        BlockCacheKey cold = new FileBlockCacheKey(Paths.get("/test/file.dat"), 0L);
+        BlockCacheKey key = new FileBlockCacheKey(Paths.get("/test/file.dat"), 8192L);
+        BlockCacheValue<String> value = createMockValue("loaded");
+        blockCache.put(cold, createMockValue("cold"));
+
+        when(mockLoader.load(key)).thenThrow(new BlockLoader.PoolAcquireFailedException("Acquire timeout")).thenReturn(value);
+        when(mockLoader.reservePoolSegment(anyLong())).thenReturn(true);
+        when(mockLoader.poolExhausted()).thenReturn(false);
+
+        assertSame(value, blockCache.getOrLoad(key));
+        assertNotNull("nothing should be evicted while the pool has free segments", blockCache.get(cold));
         verify(mockLoader, times(2)).load(key);
     }
 

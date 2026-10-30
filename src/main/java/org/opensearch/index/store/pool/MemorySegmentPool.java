@@ -40,7 +40,10 @@ public class MemorySegmentPool implements Pool<RefCountedMemorySegment>, AutoClo
     private static final Logger LOGGER = LogManager.getLogger(MemorySegmentPool.class);
 
     private final ReentrantLock lock = new ReentrantLock();
-    private final Condition notEmpty = lock.newCondition();
+    // One condition per queued caller, in arrival order; see acquireInOrder
+    private final Deque<Condition> waiters = new ArrayDeque<>();
+    // Segment taken in turn by reserve() and held for its thread's next acquire
+    private final ThreadLocal<RefCountedMemorySegment> reserved = new ThreadLocal<>();
     private final Deque<RefCountedMemorySegment> freeList = new ArrayDeque<>();
 
     private final int segmentSize;
@@ -81,33 +84,86 @@ public class MemorySegmentPool implements Pool<RefCountedMemorySegment>, AutoClo
 
     @Override
     public RefCountedMemorySegment acquire() throws InterruptedException {
+        return acquireInOrder(false, 0L);
+    }
+
+    @Override
+    public RefCountedMemorySegment tryAcquire(long timeout, TimeUnit unit) throws Exception {
+        RefCountedMemorySegment refSeg = acquireInOrder(true, unit.toNanos(timeout));
+        if (refSeg != null) {
+            return refSeg;
+        }
+        // debug, not warn: short timeouts are expected under pressure, and the block cache logs if it gives up
+        LOGGER
+            .debug("Pool acquisition timed out after {}ms (allocated={}, max={})", unit.toMillis(timeout), allocatedSegments, maxSegments);
+        throw new IOException(
+            "Pool acquisition timed out after "
+                + timeout
+                + " "
+                + unit.toString().toLowerCase()
+                + " (allocated="
+                + allocatedSegments
+                + ", max="
+                + maxSegments
+                + ")"
+        );
+    }
+
+    /**
+     * Hands out segments in arrival order once the pool runs dry. A caller that finds other callers
+     * already waiting queues behind them instead of taking the next released segment, and each
+     * released segment goes to the longest waiter. Without this, a segment freed for one waiter could
+     * be taken by a newcomer, and a waiter could be passed over until it timed out.
+     *
+     * @return a segment, or {@code null} if {@code timed} and the timeout elapsed
+     */
+    private RefCountedMemorySegment acquireInOrder(boolean timed, long timeoutNanos) throws InterruptedException {
+        RefCountedMemorySegment held = reserved.get();
+        if (held != null) {
+            reserved.remove();
+            return held;
+        }
         lock.lock();
         try {
-            while (true) {
-                if (closed) {
-                    throw new IllegalStateException("Pool is closed");
-                }
-
-                // Try freelist first
-                if (!freeList.isEmpty()) {
-                    RefCountedMemorySegment refSeg = freeList.removeFirst();
-                    cachedFreeListSize = freeList.size();
-                    refSeg.reset();
+            ensureOpen();
+            if (waiters.isEmpty()) {
+                RefCountedMemorySegment refSeg = takeLocked();
+                if (refSeg != null) {
                     return refSeg;
                 }
+            }
 
-                // Try allocate new segment if under capacity
-                if (allocatedSegments < maxSegments) {
-                    MemorySegment seg = PanamaNativeAccess.malloc(segmentSize);
-                    RefCountedMemorySegment refSeg = new RefCountedMemorySegment(seg, segmentSize, this::release);
-                    allocatedSegments++;
-                    LOGGER.trace("Allocated new native segment, total allocated={}", allocatedSegments);
-                    return refSeg;
+            LOGGER
+                .debug(
+                    "Pool exhausted (allocated={}, max={}, waiting={}), queueing for release",
+                    allocatedSegments,
+                    maxSegments,
+                    waiters.size()
+                );
+            Condition turn = lock.newCondition();
+            waiters.addLast(turn);
+            long remainingNanos = timeoutNanos;
+            try {
+                while (true) {
+                    ensureOpen();
+                    if (waiters.peekFirst() == turn) {
+                        RefCountedMemorySegment refSeg = takeLocked();
+                        if (refSeg != null) {
+                            return refSeg;
+                        }
+                    }
+                    if (!timed) {
+                        turn.await();
+                    } else if (remainingNanos <= 0) {
+                        return null;
+                    } else {
+                        remainingNanos = turn.awaitNanos(remainingNanos);
+                    }
                 }
-
-                // Pool exhausted - wait for a segment to be released
-                LOGGER.debug("Pool exhausted (allocated={}, max={}), waiting for release", allocatedSegments, maxSegments);
-                notEmpty.await();
+            } finally {
+                waiters.remove(turn);
+                // Pass the turn on, whether this waiter got a segment, timed out or was interrupted
+                signalHeadIfAvailable();
             }
         } finally {
             lock.unlock();
@@ -115,65 +171,68 @@ public class MemorySegmentPool implements Pool<RefCountedMemorySegment>, AutoClo
     }
 
     @Override
-    public RefCountedMemorySegment tryAcquire(long timeout, TimeUnit unit) throws Exception {
-        long deadlineNanos = System.nanoTime() + unit.toNanos(timeout);
+    public boolean reserve(long timeout, TimeUnit unit) throws InterruptedException {
+        if (reserved.get() != null) {
+            return true;
+        }
+        RefCountedMemorySegment refSeg = acquireInOrder(true, unit.toNanos(timeout));
+        if (refSeg == null) {
+            return false;
+        }
+        reserved.set(refSeg);
+        return true;
+    }
+
+    @Override
+    public void releaseReservation() {
+        RefCountedMemorySegment held = reserved.get();
+        if (held != null) {
+            reserved.remove();
+            held.decRef(); // back to the pool, to the next waiter in line
+        }
+    }
+
+    private void ensureOpen() {
+        if (closed) {
+            throw new IllegalStateException("Pool is closed");
+        }
+    }
+
+    /** Takes a free or newly allocated segment, or returns null when the pool is exhausted. Lock must be held. */
+    private RefCountedMemorySegment takeLocked() {
+        if (!freeList.isEmpty()) {
+            RefCountedMemorySegment refSeg = freeList.removeFirst();
+            cachedFreeListSize = freeList.size();
+            refSeg.reset();
+            return refSeg;
+        }
+        if (allocatedSegments < maxSegments) {
+            MemorySegment seg = PanamaNativeAccess.malloc(segmentSize);
+            RefCountedMemorySegment refSeg = new RefCountedMemorySegment(seg, segmentSize, this::release);
+            allocatedSegments++;
+            LOGGER.trace("Allocated new native segment, total allocated={}", allocatedSegments);
+            return refSeg;
+        }
+        return null;
+    }
+
+    /** Wakes the longest waiter if a segment can be handed out. Lock must be held. */
+    private void signalHeadIfAvailable() {
+        Condition head = waiters.peekFirst();
+        if (head != null && (!freeList.isEmpty() || allocatedSegments < maxSegments)) {
+            head.signal();
+        }
+    }
+
+    /**
+     * Returns the number of callers queued for a segment.
+     *
+     * @return queued caller count
+     */
+    public int waiterCount() {
         lock.lock();
         try {
-            while (true) {
-                if (closed) {
-                    throw new IllegalStateException("Pool is closed");
-                }
-
-                // Try freelist first
-                if (!freeList.isEmpty()) {
-                    RefCountedMemorySegment refSeg = freeList.removeFirst();
-                    cachedFreeListSize = freeList.size();
-                    refSeg.reset();
-                    return refSeg;
-                }
-
-                // Try allocate new segment if under capacity
-                if (allocatedSegments < maxSegments) {
-                    MemorySegment seg = PanamaNativeAccess.malloc(segmentSize);
-                    RefCountedMemorySegment refSeg = new RefCountedMemorySegment(seg, segmentSize, this::release);
-                    allocatedSegments++;
-                    LOGGER.trace("Allocated new native segment, total allocated={}", allocatedSegments);
-                    return refSeg;
-                }
-
-                // Pool exhausted - wait with timeout for a segment to be released
-                long remainingNanos = deadlineNanos - System.nanoTime();
-                if (remainingNanos <= 0) {
-                    // debug, not warn: callers such as the block cache retry short timeouts and log if they give up
-                    LOGGER
-                        .debug(
-                            "Pool acquisition timed out after {}ms (allocated={}, max={})",
-                            unit.toMillis(timeout),
-                            allocatedSegments,
-                            maxSegments
-                        );
-                    throw new IOException(
-                        "Pool acquisition timed out after "
-                            + timeout
-                            + " "
-                            + unit.toString().toLowerCase()
-                            + " (allocated="
-                            + allocatedSegments
-                            + ", max="
-                            + maxSegments
-                            + ")"
-                    );
-                }
-
-                LOGGER
-                    .debug(
-                        "Pool exhausted (allocated={}, max={}), waiting up to {}ms for release",
-                        allocatedSegments,
-                        maxSegments,
-                        TimeUnit.NANOSECONDS.toMillis(remainingNanos)
-                    );
-                notEmpty.await(remainingNanos, TimeUnit.NANOSECONDS);
-            }
+            return waiters.size();
         } finally {
             lock.unlock();
         }
@@ -195,7 +254,7 @@ public class MemorySegmentPool implements Pool<RefCountedMemorySegment>, AutoClo
 
             freeList.addLast(refSegment);
             cachedFreeListSize = freeList.size();
-            notEmpty.signal();
+            signalHeadIfAvailable();
         } finally {
             lock.unlock();
         }
@@ -225,7 +284,8 @@ public class MemorySegmentPool implements Pool<RefCountedMemorySegment>, AutoClo
                 freeList.addLast(s);
             }
             cachedFreeListSize = freeList.size();
-            notEmpty.signalAll();
+            // Each waiter that takes one passes the turn on while segments remain
+            signalHeadIfAvailable();
         } finally {
             lock.unlock();
         }
@@ -294,6 +354,7 @@ public class MemorySegmentPool implements Pool<RefCountedMemorySegment>, AutoClo
                 allocatedSegments++;
             }
             cachedFreeListSize = freeList.size();
+            signalHeadIfAvailable();
         } finally {
             lock.unlock();
         }
@@ -311,7 +372,8 @@ public class MemorySegmentPool implements Pool<RefCountedMemorySegment>, AutoClo
                 PanamaNativeAccess.free(seg.segment());
             }
             cachedFreeListSize = 0;
-            notEmpty.signalAll();
+            // Wake every waiter so it sees the pool is closed
+            waiters.forEach(Condition::signal);
         } finally {
             lock.unlock();
         }

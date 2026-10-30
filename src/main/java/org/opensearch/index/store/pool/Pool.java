@@ -37,6 +37,25 @@ public interface Pool<T> {
     T tryAcquire(long timeout, TimeUnit unit) throws Exception;
 
     /**
+     * Waits in turn for a resource and holds it for the calling thread: that thread's next
+     * {@link #tryAcquire} returns it without waiting. Lets a caller wait without holding locks and
+     * then acquire under a lock. Pair every successful call with {@link #releaseReservation()}.
+     *
+     * @param timeout maximum time to wait
+     * @param unit time unit for the timeout
+     * @return true if a resource is now held for this thread, false on timeout
+     * @throws InterruptedException if the thread is interrupted while waiting
+     */
+    default boolean reserve(long timeout, TimeUnit unit) throws InterruptedException {
+        return false;
+    }
+
+    /**
+     * Returns the resource held for the calling thread by {@link #reserve}, if it was not used.
+     */
+    default void releaseReservation() {}
+
+    /**
      * Returns a resource to the pool for reuse.
      *
      * @param pooled the resource to return to the pool
