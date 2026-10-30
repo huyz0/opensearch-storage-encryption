@@ -11,6 +11,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
@@ -62,6 +63,12 @@ public class MasterKeyHealthMonitor {
     // Health monitoring for automatic recovery when MasterKey Provider is restored
     private final ScheduledExecutorService healthCheckExecutor;
     private volatile ScheduledFuture<?> healthCheckTask = null;
+
+    // Applies and removes index blocks, in the order they were requested. Separate from the health check
+    // thread so block updates don't wait behind a sweep of blocking KMS calls, and off the caller's thread
+    // because reading the cluster state is not allowed on the cluster applier thread, where the first key
+    // load runs during shard creation.
+    private final ScheduledExecutorService blockUpdateExecutor;
 
     // Configurable health check interval from node settings
     private final long refreshIntervalSeconds;
@@ -174,6 +181,7 @@ public class MasterKeyHealthMonitor {
 
         // Initialize executor but don't start health check yet
         this.healthCheckExecutor = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "encryption-key-health-check"));
+        this.blockUpdateExecutor = Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "encryption-key-health-blocks"));
     }
 
     /**
@@ -226,7 +234,7 @@ public class MasterKeyHealthMonitor {
         // Only apply blocks for CRITICAL errors with valid index name. This also re-asserts them on later
         // critical failures: blocks are cluster-wide, so another node that recovered may have removed them.
         if (failureType == FailureType.CRITICAL && indexName != null) {
-            applyBlocks(indexUuid, indexName, state);
+            queueApplyBlocks(indexUuid, indexName, state);
             state.blocksApplied = true;
         }
     }
@@ -235,18 +243,49 @@ public class MasterKeyHealthMonitor {
      * Reports successful key load/reload for an index.
      * Removes the blocks the monitor applied to the index, if any, even if this node has no
      * record of the failure (for example after a restart).
+     *
+     * The removal runs on the block update thread (see {@link #queueRemoveOwnedBlocks}).
      * 
      * @param indexUuid the index UUID
      * @param indexName the index name
      */
     public void reportSuccess(String indexUuid, String indexName) {
-        FailureState state = failureTracker.remove(indexUuid);
-        if (state != null) {
-            synchronized (state) {
+        failureTracker.remove(indexUuid);
+        queueRemoveOwnedBlocks(indexUuid, indexName);
+    }
+
+    /**
+     * Applies the write block, and schedules the read block, on the block update thread.
+     * Skipped if the index recovered (or its tracking was reset) before the task runs.
+     */
+    private void queueApplyBlocks(String indexUuid, String indexName, FailureState state) {
+        try {
+            blockUpdateExecutor.execute(() -> {
+                if (failureTracker.get(indexUuid) == state) {
+                    applyBlocks(indexUuid, indexName, state);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            logger.debug("Health monitor is shut down, not applying blocks to index {}", indexName);
+        }
+    }
+
+    /**
+     * Removes the blocks the monitor owns on the block update thread. Skipped if a critical failure
+     * was reported for the index before the task runs; a transient failure (throttling) doesn't keep
+     * the blocks up.
+     */
+    private void queueRemoveOwnedBlocks(String indexUuid, String indexName) {
+        try {
+            blockUpdateExecutor.execute(() -> {
+                FailureState current = failureTracker.get(indexUuid);
+                if (current != null && current.failureType == FailureType.CRITICAL) {
+                    return;
+                }
                 removeOwnedBlocks(indexName);
-            }
-        } else {
-            removeOwnedBlocks(indexName);
+            });
+        } catch (RejectedExecutionException e) {
+            logger.debug("Health monitor is shut down, not removing blocks for index {}", indexName);
         }
     }
 
@@ -272,6 +311,11 @@ public class MasterKeyHealthMonitor {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    private Settings indexSettingsOrEmpty(String indexName) {
+        Settings settings = currentIndexSettings(indexName);
+        return settings == null ? Settings.EMPTY : settings;
     }
 
     private static boolean hasBlock(Settings indexSettings, String block) {
@@ -301,25 +345,20 @@ public class MasterKeyHealthMonitor {
         // Apply write block first - prevents new writes that would need encryption keys
         applyBlock(indexName, WRITE_BLOCK);
 
-        // Step 2: Schedule read block after grace period on existing executor
-        synchronized (state) {
-            if (state.readBlockScheduled) {
-                return;
-            }
-            state.readBlockScheduled = true;
+        // Step 2: Schedule read block after grace period. Runs on the block update thread like this method,
+        // so it is ordered with removals and needs no lock
+        if (state.readBlockScheduled) {
+            return;
         }
+        state.readBlockScheduled = true;
         try {
-            healthCheckExecutor.schedule(() -> {
-                synchronized (state) {
-                    state.readBlockScheduled = false;
-                    // Checked under the lock that reportSuccess holds while clearing, so a recovered index
-                    // can't be re-blocked
-                    if (failureTracker.get(indexUuid) != state) {
-                        // Recovered (or tracking reset) during the grace period
-                        return;
-                    }
-                    applyBlock(indexName, READ_BLOCK);
+            blockUpdateExecutor.schedule(() -> {
+                state.readBlockScheduled = false;
+                if (failureTracker.get(indexUuid) != state) {
+                    // Recovered (or tracking reset) during the grace period
+                    return;
                 }
+                applyBlock(indexName, READ_BLOCK);
             }, BLOCK_GRACE_PERIOD_SECONDS, TimeUnit.SECONDS);
         } catch (Exception e) {
             state.readBlockScheduled = false;
@@ -531,9 +570,10 @@ public class MasterKeyHealthMonitor {
                             // Remove only the blocks the monitor applied (recorded in the index settings, so
                             // this also cleans up after a restart); blocks set by others are kept
                             failureTracker.remove(indexUuid);
-                            if (removeOwnedBlocks(indexName)) {
+                            if (INDEX_HEALTH_MONITOR_BLOCKS_SETTING.get(indexSettingsOrEmpty(indexName)).isEmpty() == false) {
                                 recoveredCount++;
                             }
+                            queueRemoveOwnedBlocks(indexUuid, indexName);
                         }
 
                     } catch (Exception recoveryException) {
@@ -567,7 +607,7 @@ public class MasterKeyHealthMonitor {
                         // 1. Error is critical, AND
                         // 2. Key is NOT in cache (expired or never loaded)
                         if (indexName != null && !indexName.equals(indexUuid) && failureType == FailureType.CRITICAL && !keyInCache) {
-                            applyBlocks(indexUuid, indexName, state);
+                            queueApplyBlocks(indexUuid, indexName, state);
                             state.blocksApplied = true;
                         }
                     } else {
@@ -577,7 +617,7 @@ public class MasterKeyHealthMonitor {
                         // removed blocks it set when its own key recovered
                         if (failureType == FailureType.CRITICAL && !keyInCache) {
                             if (indexName != null && !indexName.equals(indexUuid)) {
-                                applyBlocks(indexUuid, indexName, state);
+                                queueApplyBlocks(indexUuid, indexName, state);
                                 state.blocksApplied = true;
                             }
                         }
@@ -605,16 +645,22 @@ public class MasterKeyHealthMonitor {
             if (INSTANCE.healthCheckTask != null) {
                 INSTANCE.healthCheckTask.cancel(true);
             }
-            if (INSTANCE.healthCheckExecutor != null) {
-                INSTANCE.healthCheckExecutor.shutdownNow();
-                try {
-                    if (!INSTANCE.healthCheckExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                        logger.warn("Health check executor did not terminate in time");
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
+            shutdownExecutor(INSTANCE.healthCheckExecutor, "Health check");
+            shutdownExecutor(INSTANCE.blockUpdateExecutor, "Block update");
+        }
+    }
+
+    private static void shutdownExecutor(ScheduledExecutorService executor, String name) {
+        if (executor == null) {
+            return;
+        }
+        executor.shutdownNow();
+        try {
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                logger.warn("{} executor did not terminate in time", name);
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
