@@ -17,7 +17,7 @@ import org.opensearch.test.OpenSearchTestCase;
  *
  * <p>The expected values were produced by an independent HKDF implementation
  * (src/test/resources/org/opensearch/index/store/golden/generate_golden_vectors.py).
- * Every file key and frame IV on disk depends on these derivations, so a change
+ * Every file key on disk depends on these derivations, so a change
  * to any expected value here means existing encrypted indices can no longer be read.
  */
 public class HkdfKeyDerivationKnownAnswerTests extends OpenSearchTestCase {
