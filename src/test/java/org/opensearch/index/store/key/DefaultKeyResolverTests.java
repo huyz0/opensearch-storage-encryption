@@ -20,6 +20,7 @@ import java.nio.file.Path;
 import java.security.Key;
 import java.security.Provider;
 import java.security.Security;
+import java.util.Arrays;
 import java.util.concurrent.ConcurrentMap;
 
 import org.apache.lucene.store.Directory;
@@ -377,7 +378,11 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
 
         new DefaultKeyResolver(TEST_INDEX_UUID, "test-index", directory, provider, mockKeyProvider, TEST_SHARD_ID);
 
-        assertArrayEquals(new String[] { "keyfile" }, directory.listAll());
+        // Lucene's test filesystem may add its own "extraN" files, so check for leftover temp files only
+        for (String file : directory.listAll()) {
+            assertFalse("leftover temp file: " + file, file.endsWith(".tmp"));
+        }
+        assertTrue(Arrays.asList(directory.listAll()).contains("keyfile"));
         assertEquals(Integer.BYTES + encryptedKey.length, directory.fileLength("keyfile"));
     }
 
