@@ -179,7 +179,7 @@ Configure these when creating an index. Setting `index.store.type` to `"cryptofs
 |---------|-------------|------|---------------|
 | `index.store.type` | **Set to `"cryptofs"` to enable encryption** | String | `cryptofs` (for encryption) or standard types (`niofs`, `hybridfs`, `mmapfs`, `simplefs`) |
 | `index.store.crypto.provider` | Crypto provider for encryption | String | Any registered Java Security provider |
-| `index.store.crypto.key_provider` | Key management provider type **(required when using cryptofs)** | String | `aws-kms`, `dummy` (testing only) |
+| `index.store.crypto.key_provider` | Key management provider type **(required when using cryptofs)** | String | `aws-kms`, `dummy` (testing only; rejected unless `node.store.crypto.allow_dummy_key_provider` is true) |
 | `index.store.crypto.kms.key_arn` | AWS KMS key ARN (master key) **(required when using cryptofs)** | String | Valid AWS KMS ARN format |
 | `index.store.crypto.kms.encryption_context` | AWS KMS encryption context **(required when using cryptofs)** | String | Additional authenticated data for KMS |
 
@@ -215,6 +215,7 @@ Configure in `opensearch.yml`:
 | `node.store.crypto.warmup_percentage` | Percentage of cache blocks to warmup at initialization | Double | `0.0` - `1.0` |
 | `node.store.crypto.key_refresh_interval` | Interval for refreshing data keys from KMS | TimeValue | `-1` (never) or positive duration |
 | `node.store.crypto.key_expiry_interval` | Expiration time for keys after refresh failures | TimeValue | `-1` (never) or positive duration |
+| `node.store.crypto.allow_dummy_key_provider` | Allow indices to use the `dummy` key provider, which stores the data key in plaintext. **For tests only** | Boolean | `false` (default) or `true` |
 
 **Time Value Format:**
 - Supported units: `s` (seconds), `m` (minutes), `h` (hours), `d` (days)

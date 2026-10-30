@@ -193,6 +193,26 @@ public class CryptoIndexSettingsValidatorTests extends OpenSearchTestCase {
             .build();
 
         // Should not throw any exception - KMS ARN not required for non-aws-kms providers
-        CryptoIndexSettingsValidator.validate(settings);
+        CryptoIndexSettingsValidator.validate(settings, true);
+    }
+
+    public void testValidateRejectsDummyKeyProviderByDefault() {
+        Settings settings = Settings
+            .builder()
+            .put(IndexModule.INDEX_STORE_TYPE_SETTING.getKey(), "cryptofs")
+            .put(CryptoDirectoryFactory.INDEX_KEY_PROVIDER_SETTING.getKey(), "dummy")
+            .build();
+
+        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> CryptoIndexSettingsValidator.validate(settings));
+        assertTrue(e.getMessage(), e.getMessage().contains("node.store.crypto.allow_dummy_key_provider"));
+        expectThrows(IllegalArgumentException.class, () -> CryptoIndexSettingsValidator.validate(settings, false));
+    }
+
+    public void testAllowDummyKeyProviderSettingDefaultsToFalse() {
+        assertFalse(CryptoDirectoryFactory.NODE_ALLOW_DUMMY_KEY_PROVIDER_SETTING.get(Settings.EMPTY));
+        assertTrue(
+            CryptoDirectoryFactory.NODE_ALLOW_DUMMY_KEY_PROVIDER_SETTING
+                .get(Settings.builder().put("node.store.crypto.allow_dummy_key_provider", true).build())
+        );
     }
 }
