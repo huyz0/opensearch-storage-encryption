@@ -5,17 +5,25 @@
 package org.opensearch.index.store.key;
 
 import java.io.IOException;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.Key;
 import java.security.Provider;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import javax.crypto.spec.SecretKeySpec;
 
+import org.apache.lucene.index.CorruptIndexException;
+import org.apache.lucene.index.IndexFileNames;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
+import org.apache.lucene.util.IOUtils;
 import org.opensearch.common.crypto.DataKeyPair;
 import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
@@ -43,6 +51,7 @@ public class DefaultKeyResolver implements KeyResolver {
     private final int shardId;
 
     private static final String KEY_FILE = "keyfile";
+    private static final String KEY_FILE_TEMP_SUFFIX = "tmp";
 
     /**
      * Constructs a new {@link DefaultKeyResolver} and ensures the key is initialized.
@@ -83,7 +92,9 @@ public class DefaultKeyResolver implements KeyResolver {
 
     /**
      * Attempts to load the encrypted key from the directory.
-     * If not present, it generates and persists new values.
+     * If not present, it generates and persists new values, unless shard data already exists
+     * for this index: that data was encrypted with a key that is now lost, so generating a
+     * fresh key would silently make it undecryptable.
      */
     private void initialize(int shardId) throws KeyCacheException {
         try {
@@ -91,6 +102,7 @@ public class DefaultKeyResolver implements KeyResolver {
         } catch (java.nio.file.NoSuchFileException e) {
             // Key file doesn't exist, generate new one
             try {
+                ensureNoExistingShardData();
                 initNewKey(shardId);
             } catch (Exception ex) {
                 CryptoMetricsService.getInstance().recordError(ErrorType.KMS_KEY_ERROR, getMetricKey(ex));
@@ -114,11 +126,77 @@ public class DefaultKeyResolver implements KeyResolver {
     }
 
     /**
+     * Refuses to generate a new key when this index already has shard data in the directory.
+     * Only applies to filesystem directories, where the index-level directory holds the shard
+     * subdirectories ({@code <shardId>/index}).
+     */
+    private void ensureNoExistingShardData() throws IOException {
+        if (directory instanceof FSDirectory == false) {
+            return;
+        }
+        Path existing = findExistingShardData(((FSDirectory) directory).getDirectory());
+        if (existing != null) {
+            throw new IOException(
+                "encryption keyfile is missing but shard data already exists at ["
+                    + existing
+                    + "]; refusing to generate a new key because the existing data could no longer be decrypted. "
+                    + "Restore the keyfile, or delete the shard data so it can be recovered from another copy"
+            );
+        }
+    }
+
+    /**
+     * Returns the first Lucene commit point ({@code segments_N}) found under the shard subdirectories
+     * of {@code indexDirectory}, or {@code null} if there is none. A new shard's directories may already
+     * exist when the key is created, but its first commit is only written after the key exists.
+     */
+    static Path findExistingShardData(Path indexDirectory) throws IOException {
+        if (Files.isDirectory(indexDirectory) == false) {
+            return null;
+        }
+        try (DirectoryStream<Path> shards = Files.newDirectoryStream(indexDirectory, Files::isDirectory)) {
+            for (Path shard : shards) {
+                Path found = findCommitPoint(shard.resolve("index"));
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Path findCommitPoint(Path dir) throws IOException {
+        if (Files.isDirectory(dir) == false) {
+            return null;
+        }
+        try (DirectoryStream<Path> files = Files.newDirectoryStream(dir)) {
+            for (Path file : files) {
+                String name = file.getFileName().toString();
+                if (name.startsWith(IndexFileNames.SEGMENTS + "_")) {
+                    return file;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
      * Reads a byte array from the specified file in the directory.
+     * The file must contain exactly a 4-byte length followed by that many bytes, so a truncated
+     * or padded keyfile is reported as corrupt instead of being handed to the key provider.
      */
     private byte[] readByteArrayFile(String fileName) throws IOException {
         try (IndexInput in = directory.openInput(fileName, IOContext.READONCE)) {
+            if (in.length() < Integer.BYTES) {
+                throw new CorruptIndexException("keyfile is too short: " + in.length() + " bytes", in);
+            }
             int size = in.readInt();
+            if (size < 0 || size != in.length() - Integer.BYTES) {
+                throw new CorruptIndexException(
+                    "keyfile length mismatch: header says " + size + " bytes, file has " + (in.length() - Integer.BYTES),
+                    in
+                );
+            }
             byte[] bytes = new byte[size];
             in.readBytes(bytes, 0, size);
             return bytes;
@@ -126,12 +204,27 @@ public class DefaultKeyResolver implements KeyResolver {
     }
 
     /**
-     * Writes a byte array to the specified file in the directory.
+     * Durably and atomically writes a byte array to the specified file in the directory:
+     * the data goes to a temp file which is fsynced, then renamed over the target, and the
+     * directory metadata is fsynced so the rename survives a crash.
      */
     private void writeByteArrayFile(String fileName, byte[] data) throws IOException {
-        try (IndexOutput out = directory.createOutput(fileName, IOContext.DEFAULT)) {
-            out.writeInt(data.length);
-            out.writeBytes(data, 0, data.length);
+        String tempName = null;
+        boolean success = false;
+        try {
+            try (IndexOutput out = directory.createTempOutput(fileName, KEY_FILE_TEMP_SUFFIX, IOContext.DEFAULT)) {
+                tempName = out.getName();
+                out.writeInt(data.length);
+                out.writeBytes(data, 0, data.length);
+            }
+            directory.sync(List.of(tempName));
+            directory.rename(tempName, fileName);
+            directory.syncMetaData();
+            success = true;
+        } finally {
+            if (success == false && tempName != null) {
+                IOUtils.deleteFilesIgnoringExceptions(directory, tempName);
+            }
         }
     }
 
