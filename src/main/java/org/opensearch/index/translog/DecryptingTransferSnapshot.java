@@ -95,11 +95,6 @@ public class DecryptingTransferSnapshot implements TransferSnapshot {
         for (TransferFileSnapshot snapshot : originals) {
             if (snapshot instanceof TranslogFileSnapshot) {
                 TranslogFileSnapshot translogSnapshot = (TranslogFileSnapshot) snapshot;
-                java.nio.file.Path path = translogSnapshot.getPath();
-
-                // This writes authentication tags so the file can be decrypted during upload
-                cryptoFactory.finalizeForPath(path);
-
                 wrapped.add(new DecryptingFileSnapshot(translogSnapshot, keyResolver, translogUUID));
             } else {
                 wrapped.add(snapshot);

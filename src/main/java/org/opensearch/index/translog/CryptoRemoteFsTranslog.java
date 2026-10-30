@@ -29,7 +29,7 @@ import org.opensearch.repositories.blobstore.BlobStoreRepository;
 import org.opensearch.threadpool.ThreadPool;
 
 /**
- * A RemoteFsTranslog implementation that provides AES-GCM encryption capabilities
+ * A RemoteFsTranslog implementation that encrypts translog files
  * with decrypt-before-upload for remote store.
  *
  * @opensearch.internal
