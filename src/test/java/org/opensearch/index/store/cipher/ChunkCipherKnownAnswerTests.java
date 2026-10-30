@@ -131,10 +131,7 @@ public class ChunkCipherKnownAnswerTests extends OpenSearchTestCase {
         byte[] out = new byte[ChunkCipher.CHUNK_SIZE + 1 + ChunkCipher.TAG_LENGTH];
         Cipher cipher = ChunkCipher.newCipher();
         expectThrows(IllegalArgumentException.class, () -> ChunkCipher.seal(cipher, KEY, 0, PLAINTEXT, 0, 0, out));
-        expectThrows(
-            IllegalArgumentException.class,
-            () -> ChunkCipher.seal(cipher, KEY, 0, PLAINTEXT, 0, ChunkCipher.CHUNK_SIZE + 1, out)
-        );
+        expectThrows(IllegalArgumentException.class, () -> ChunkCipher.seal(cipher, KEY, 0, PLAINTEXT, 0, ChunkCipher.CHUNK_SIZE + 1, out));
         expectThrows(
             IllegalArgumentException.class,
             () -> ChunkCipher.open(KEY, 0, ByteBuffer.allocate(10), ByteBuffer.allocate(15), ByteBuffer.allocate(10))
