@@ -5,12 +5,9 @@
 package org.opensearch.index.store.block_cache;
 
 import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.opensearch.common.util.concurrent.OpenSearchExecutors;
-import org.opensearch.common.util.concurrent.ThreadContext;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
@@ -51,10 +48,10 @@ public final class BlockCacheBuilder {
         }
 
         /**
-         * Returns the executor used for asynchronous cache removal operations.
-         * This executor must be shut down when the cache is no longer needed.
+         * Returns the executor for asynchronous cache removal, or {@code null}: removals are now
+         * processed synchronously, so {@link BlockCacheBuilder#build} no longer creates one.
          *
-         * @return the thread pool executor
+         * @return the thread pool executor, or {@code null}
          */
         public ThreadPoolExecutor getExecutor() {
             return executor;
@@ -71,31 +68,23 @@ public final class BlockCacheBuilder {
      * @return CacheWithExecutor containing the configured cache and its executor
      */
     public static <T extends AutoCloseable, V> CacheWithExecutor<T, V> build(int initialCapacity, long maxBlocks) {
-        ThreadPoolExecutor removalExec = OpenSearchExecutors
-            .newScaling(
-                "block-cache-maint",
-                4,
-                8,
-                60L,
-                TimeUnit.SECONDS,
-                OpenSearchExecutors.daemonThreadFactory("block-cache-maint"),
-                new ThreadContext(org.opensearch.common.settings.Settings.EMPTY)
-            );
-
+        // Removal notifications run on the thread that removed the entry (Runnable::run), and the value is
+        // closed right there. Handing them to an executor delayed the segment's return to the pool behind a
+        // queue, so under memory pressure an eviction made to free a segment did not free it in time and the
+        // miss that triggered it still timed out. Closing is a CAS plus a short pool lock, cheap enough inline.
         Cache<BlockCacheKey, BlockCacheValue<T>> cache = Caffeine
             .newBuilder()
             .initialCapacity(initialCapacity)
             .recordStats()
             .maximumSize(maxBlocks)
+            .executor(Runnable::run)
             .removalListener((BlockCacheKey key, BlockCacheValue<T> value, RemovalCause cause) -> {
                 if (value != null) {
-                    removalExec.execute(() -> {
-                        try {
-                            value.close();
-                        } catch (Throwable t) {
-                            LOGGER.warn("Failed to close cached value during removal {}", key, t);
-                        }
-                    });
+                    try {
+                        value.close();
+                    } catch (Throwable t) {
+                        LOGGER.warn("Failed to close cached value during removal {}", key, t);
+                    }
                 }
             })
             .build();
@@ -104,6 +93,6 @@ public final class BlockCacheBuilder {
         // Per-directory caches will wrap this cache with their own loaders
         // that provide directory-specific decryption keys.
         CaffeineBlockCache<T, V> caffeineBlockCache = new CaffeineBlockCache<>(cache, null, maxBlocks);
-        return new CacheWithExecutor<>(caffeineBlockCache, removalExec);
+        return new CacheWithExecutor<>(caffeineBlockCache, null);
     }
 }
