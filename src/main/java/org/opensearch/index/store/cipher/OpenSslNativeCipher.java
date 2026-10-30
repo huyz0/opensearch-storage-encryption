@@ -15,6 +15,8 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 
 import org.apache.logging.log4j.LogManager;
@@ -51,8 +53,55 @@ public final class OpenSslNativeCipher {
     public static final int EVP_CTRL_GCM_GET_TAG = 0x10;
     public static final int EVP_CTRL_GCM_SET_TAG = 0x11;
 
+    /** libcrypto file names to look for on Linux, newest OpenSSL first. Declared before LIBCRYPTO, which reads it. */
+    private static final List<String> LINUX_LIBCRYPTO_NAMES = List
+        .of("libcrypto.so.3", "libcrypto.so.1.1", "libcrypto.so.10", "libcrypto.so");
+
     private static final Linker LINKER = Linker.nativeLinker();
     private static final SymbolLookup LIBCRYPTO = loadLibcrypto();
+
+    /**
+     * Candidate libcrypto paths on Linux, in lookup order: RHEL-style {@code lib64} directories first,
+     * then the Debian/Ubuntu multiarch directories for this CPU (e.g. {@code /usr/lib/x86_64-linux-gnu}),
+     * then plain {@code lib} directories. For each directory, newer OpenSSL versions come first.
+     *
+     * @param osArch the value of the {@code os.arch} system property
+     * @return the ordered candidate paths
+     */
+    static List<Path> linuxLibcryptoPaths(String osArch) {
+        List<String> dirs = new ArrayList<>(List.of("/lib64", "/usr/lib64"));
+        String triplet = multiarchTriplet(osArch);
+        if (triplet != null) {
+            dirs.add("/lib/" + triplet);
+            dirs.add("/usr/lib/" + triplet);
+        }
+        dirs.add("/lib");
+        dirs.add("/usr/lib");
+
+        List<Path> paths = new ArrayList<>();
+        for (String dir : dirs) {
+            for (String name : LINUX_LIBCRYPTO_NAMES) {
+                paths.add(Path.of(dir, name));
+            }
+        }
+        return paths;
+    }
+
+    /**
+     * Maps {@code os.arch} to the Debian multiarch triplet, or {@code null} if unknown.
+     */
+    static String multiarchTriplet(String osArch) {
+        if (osArch == null) {
+            return null;
+        }
+        return switch (osArch.toLowerCase(Locale.ROOT)) {
+            case "amd64", "x86_64" -> "x86_64-linux-gnu";
+            case "aarch64", "arm64" -> "aarch64-linux-gnu";
+            case "ppc64le" -> "powerpc64le-linux-gnu";
+            case "s390x" -> "s390x-linux-gnu";
+            default -> null;
+        };
+    }
 
     private static SymbolLookup loadLibcrypto() {
         String os = System.getProperty("os.name").toLowerCase(Locale.ROOT);
@@ -73,27 +122,27 @@ public final class OpenSslNativeCipher {
 
             throw new RuntimeException("Could not find libcrypto.dylib in expected macOS locations.");
         } else if (os.contains("linux")) {
-            try {
-                // Try OpenSSL 3 first
-                String[] linuxPaths = {
-                    "/lib64/libcrypto.so.3",     // OpenSSL 3
-                    "/lib64/libcrypto.so.1.1",   // OpenSSL 1.1 fallback
-                    "/lib64/libcrypto.so.10",    // Legacy systems
-                    "/lib64/libcrypto.so",       // Generic symlink
-                    "/lib/libcrypto.so.3",
-                    "/lib/libcrypto.so" };
-
-                for (String path : linuxPaths) {
-                    Path p = Path.of(path);
-                    if (Files.exists(p)) {
-                        return SymbolLookup.libraryLookup(p, Arena.global());
-                    }
+            for (Path p : linuxLibcryptoPaths(System.getProperty("os.arch"))) {
+                if (Files.exists(p)) {
+                    LOGGER.debug("Loading libcrypto from {}", p);
+                    return SymbolLookup.libraryLookup(p, Arena.global());
                 }
-
-                throw new RuntimeException("Could not find libcrypto in known Linux paths.");
-            } catch (RuntimeException e) {
-                throw new RuntimeException("Failed to load libcrypto", e);
             }
+            // Fall back to the dynamic linker's search path (ld.so.cache, LD_LIBRARY_PATH)
+            for (String name : LINUX_LIBCRYPTO_NAMES) {
+                try {
+                    SymbolLookup lookup = SymbolLookup.libraryLookup(name, Arena.global());
+                    LOGGER.debug("Loading libcrypto {} through the dynamic linker", name);
+                    return lookup;
+                } catch (IllegalArgumentException e) {
+                    // not found under this name, try the next one
+                }
+            }
+            throw new RuntimeException(
+                "Failed to load libcrypto: not found in "
+                    + linuxLibcryptoPaths(System.getProperty("os.arch"))
+                    + " or the dynamic linker path"
+            );
         } else {
             throw new UnsupportedOperationException("Unsupported OS: " + os);
         }
