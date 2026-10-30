@@ -258,4 +258,39 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
 
         assertFalse("Data should be encrypted on disk", rawContent.contains("sensitive document data"));
     }
+
+    /**
+     * Reads at or past the end of the data must return -1, as FileChannel does. Returning 0 makes
+     * callers that loop until their buffer is full (core's Channels.readFromFileChannel) spin.
+     */
+    public void testReadAtEndOfDataReturnsMinusOne() throws IOException {
+        String testTranslogUUID = "test-eof-uuid";
+        CryptoChannelFactory channelFactory = new CryptoChannelFactory(keyResolver, testTranslogUUID);
+        Path translogPath = tempDir.resolve("test-eof.tlog");
+        byte[] testData = randomByteArrayOfLength(randomIntBetween(1, 2000));
+
+        int headerSize;
+        try (FileChannel writeChannel = channelFactory.open(translogPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+            TranslogHeader header = new TranslogHeader(testTranslogUUID, 1L);
+            header.write(writeChannel, false);
+            headerSize = header.sizeInBytes();
+            writeChannel.write(ByteBuffer.wrap(testData), headerSize);
+        }
+
+        long end = headerSize + testData.length;
+        try (FileChannel readChannel = channelFactory.open(translogPath, StandardOpenOption.READ)) {
+            assertEquals("positional read at end", -1, readChannel.read(ByteBuffer.allocate(16), end));
+            assertEquals("positional read past end", -1, readChannel.read(ByteBuffer.allocate(16), end + 100));
+
+            readChannel.position(end);
+            assertEquals("relative read at end", -1, readChannel.read(ByteBuffer.allocate(16)));
+            assertEquals("position unchanged after EOF", end, readChannel.position());
+            assertEquals("scattering read at end", -1L, readChannel.read(new ByteBuffer[] { ByteBuffer.allocate(16) }, 0, 1));
+
+            // A read that starts inside the data still returns what is there.
+            ByteBuffer last = ByteBuffer.allocate(16);
+            assertEquals(1, readChannel.read(last, end - 1));
+            assertEquals(testData[testData.length - 1], last.get(0));
+        }
+    }
 }
