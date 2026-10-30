@@ -31,19 +31,30 @@ public class CryptoIndexSettingsValidator {
     private static final String AWS_KMS_PROVIDER = "aws-kms";
 
     /**
-     * Validates all crypto-related index settings.
+     * Validates all crypto-related index settings, rejecting the dummy key provider.
      *
      * @param indexSettings the index settings to validate
      * @throws IllegalArgumentException if any setting is invalid
      */
     public static void validate(Settings indexSettings) {
+        validate(indexSettings, false);
+    }
+
+    /**
+     * Validates all crypto-related index settings.
+     *
+     * @param indexSettings the index settings to validate
+     * @param allowDummyKeyProvider whether this node allows the {@code dummy} key provider
+     * @throws IllegalArgumentException if any setting is invalid
+     */
+    public static void validate(Settings indexSettings, boolean allowDummyKeyProvider) {
         String storeType = indexSettings.get(IndexModule.INDEX_STORE_TYPE_SETTING.getKey());
 
         if (!CryptoDirectoryFactory.STORE_TYPE.equals(storeType)) {
             return;
         }
 
-        validateKeyProvider(indexSettings);
+        validateKeyProvider(indexSettings, allowDummyKeyProvider);
         validateKmsSettings(indexSettings);
         validateKmsEncryptionContext(indexSettings);
     }
@@ -51,11 +62,15 @@ public class CryptoIndexSettingsValidator {
     /**
      * Validates the crypto key provider setting.
      */
-    private static void validateKeyProvider(Settings indexSettings) {
+    private static void validateKeyProvider(Settings indexSettings, boolean allowDummyKeyProvider) {
         String keyProvider = indexSettings.get(CryptoDirectoryFactory.INDEX_KEY_PROVIDER_SETTING.getKey());
 
         if (keyProvider == null || keyProvider.isEmpty()) {
             throw new IllegalArgumentException("index.store.crypto.key_provider must be specified when index.store.type is 'cryptofs'");
+        }
+
+        if (KeyProviderType.DUMMY.getValue().equals(keyProvider)) {
+            CryptoDirectoryFactory.ensureDummyKeyProviderAllowed(allowDummyKeyProvider);
         }
     }
 

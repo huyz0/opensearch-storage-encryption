@@ -80,6 +80,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
 
     private NodeEnvironment nodeEnvironment;
     private final boolean enabled;
+    private final boolean allowDummyKeyProvider;
 
     // Static storage for remote store parameters (accessible by CryptoEngineFactory)
     private static Supplier<RepositoriesService> repositoriesServiceSupplier;
@@ -92,6 +93,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
     public CryptoDirectoryPlugin(Settings settings) {
         super();
         this.enabled = settings.getAsBoolean(CRYPTO_PLUGIN_ENABLED, false);
+        this.allowDummyKeyProvider = CryptoDirectoryFactory.NODE_ALLOW_DUMMY_KEY_PROVIDER_SETTING.get(settings);
 
         if (enabled) {
             log.info("OpenSearch Crypto Directory Plugin is enabled and ready for encryption operations");
@@ -144,6 +146,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
                 CryptoDirectoryFactory.NODE_KEY_REFRESH_INTERVAL_SETTING,
                 CryptoDirectoryFactory.NODE_KEY_EXPIRY_INTERVAL_SETTING,
                 CryptoDirectoryFactory.WRITE_CACHE_ENABLED_SETTING,
+                CryptoDirectoryFactory.NODE_ALLOW_DUMMY_KEY_PROVIDER_SETTING,
                 PoolSizeCalculator.NODE_POOL_SIZE_PERCENTAGE_SETTING,
                 PoolSizeCalculator.NODE_CACHE_TO_POOL_RATIO_SETTING,
                 PoolSizeCalculator.NODE_WARMUP_PERCENTAGE_SETTING,
@@ -278,7 +281,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
 
         if (CryptoDirectoryFactory.STORE_TYPE.equals(storeType)) {
             // Validate crypto settings early at index creation time
-            CryptoIndexSettingsValidator.validate(indexSettings);
+            CryptoIndexSettingsValidator.validate(indexSettings, allowDummyKeyProvider);
             indexModule.addIndexEventListener(new IndexEventListener() {
                 /*
                  * Cache invalidation for closed shards is handled automatically

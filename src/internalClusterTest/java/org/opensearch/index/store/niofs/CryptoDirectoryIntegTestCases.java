@@ -40,6 +40,7 @@ public class CryptoDirectoryIntegTestCases extends OpenSearchIntegTestCase {
             .builder()
             .put(super.nodeSettings(nodeOrdinal))
             .put("plugins.crypto.enabled", true)
+            .put("node.store.crypto.allow_dummy_key_provider", true)
             .put("node.store.crypto.pool_size_percentage", 0.05)  // 5% of off-heap for tests (smaller pool)
             .put("node.store.crypto.warmup_percentage", 0.0)      // No warmup to avoid pre-allocating memory
             .put("node.store.crypto.cache_to_pool_ratio", 0.8)

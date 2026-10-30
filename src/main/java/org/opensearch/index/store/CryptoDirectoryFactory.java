@@ -84,6 +84,16 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         .boolSetting("node.store.crypto.write_cache_enabled", true, Property.NodeScope, Property.Dynamic);
 
     /**
+     * Allows indices to use the {@code dummy} key provider on this node. The dummy provider stores the
+     * data key in plaintext next to the data, so it gives no protection and exists only for tests.
+     * Default: false.
+     */
+    public static final Setting<Boolean> NODE_ALLOW_DUMMY_KEY_PROVIDER_SETTING = Setting
+        .boolSetting("node.store.crypto.allow_dummy_key_provider", false, Property.NodeScope);
+
+    private static volatile boolean allowDummyKeyProvider = false;
+
+    /**
      * Current value of the write cache enabled setting, updated dynamically via cluster settings.
      */
     private static volatile boolean writeCacheEnabled = true;
@@ -234,11 +244,28 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         return encryptionContextResolver.resolveDefaultEncryptionContext();
     }
 
+    /**
+     * Rejects the {@code dummy} key provider unless the node explicitly allows it.
+     *
+     * @param allowed the value of {@link #NODE_ALLOW_DUMMY_KEY_PROVIDER_SETTING} on this node
+     * @throws IllegalArgumentException if the dummy key provider is not allowed
+     */
+    static void ensureDummyKeyProviderAllowed(boolean allowed) {
+        if (allowed == false) {
+            throw new IllegalArgumentException(
+                "index.store.crypto.key_provider [dummy] is for testing only and provides no protection; set ["
+                    + NODE_ALLOW_DUMMY_KEY_PROVIDER_SETTING.getKey()
+                    + ": true] on every node to allow it"
+            );
+        }
+    }
+
     MasterKeyProvider getKeyProvider(IndexSettings indexSettings) {
         final String KEY_PROVIDER = indexSettings.getValue(INDEX_KEY_PROVIDER_SETTING);
 
         // Handle dummy type for testing
         if (KeyProviderType.DUMMY.getValue().equals(KEY_PROVIDER)) {
+            ensureDummyKeyProviderAllowed(allowDummyKeyProvider);
             LOGGER.debug("Using dummy key provider for testing");
             return DummyKeyProvider.create();
         }
@@ -554,6 +581,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
      */
     public static void setNodeSettings(Settings settings) {
         nodeSettings = settings;
+        allowDummyKeyProvider = NODE_ALLOW_DUMMY_KEY_PROVIDER_SETTING.get(settings);
         writeCacheEnabled = WRITE_CACHE_ENABLED_SETTING.get(settings);
     }
 
