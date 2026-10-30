@@ -29,9 +29,10 @@ import org.opensearch.index.store.key.HkdfKeyDerivation;
  * Field Name   Size in Bytes
  * ------------  -------------
  * FooterAuthTag      16
- * GCMTagList         16 * FrameCount
- * FrameCount         2
- * FrameSize          6
+ * GCMTagList         16 * TagCount
+ * TagCount           4
+ * FrameSize          8
+ * FrameCount         4
  * MessageId          16
  * KeyMetadata        Variable // currently empty
  * KeyMetadataLength  2
