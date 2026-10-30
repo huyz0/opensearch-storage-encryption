@@ -163,7 +163,9 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
 
             return value;
         } catch (UncheckedIOException e) {
-            throw e;
+            // Unwrap so callers see the loader's IOException, e.g. a CorruptIndexException
+            // from a block that failed authentication, which OpenSearch acts on as corruption.
+            throw e.getCause();
         } catch (RuntimeException e) {
             throw new IOException("Failed to load block for key: " + key, e);
         }

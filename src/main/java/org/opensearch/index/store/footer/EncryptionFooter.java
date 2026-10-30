@@ -6,11 +6,8 @@ package org.opensearch.index.store.footer;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.nio.file.Path;
 import java.security.SecureRandom;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.List;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
@@ -18,26 +15,29 @@ import javax.crypto.spec.SecretKeySpec;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.opensearch.index.store.cipher.AesGcmCipherFactory;
+import org.opensearch.index.store.cipher.ChunkCipher;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
 
 /**
- * Footer format: [FooterAuthTag(16)][GcmTags...][TagCount(4)][FrameSize(8)][FrameCount(4)][MessageId(16)][KeyMetadata(0)]
+ * Footer of an encrypted index file.
+ *
+ * <p>File layout: {@code [Ciphertext(DataLength)][ChunkTags(16 * chunkCount)][Footer]}. The data is
+ * sealed in {@link ChunkCipher} chunks; the tag table holds one GCM tag per chunk, in order.
+ *
+ * Footer format: [FooterAuthTag(16)][DataLength(8)][ChunkSize(4)][MessageId(16)][KeyMetadata(0)]
  * [KeyMetadataLength(2)][AlgorithmId(2)][FooterLength(4)][Magic(4)]
  *
  * Field Name   Size in Bytes
  * ------------  -------------
- * FooterAuthTag      16
- * GCMTagList         16 * TagCount
- * TagCount           4
- * FrameSize          8
- * FrameCount         4
+ * FooterAuthTag      16    GCM tag over the rest of the footer (as AAD)
+ * DataLength         8     plaintext length; authenticated, so truncation is detected
+ * ChunkSize          4     must be ChunkCipher.CHUNK_SIZE
  * MessageId          16
  * KeyMetadata        Variable // currently empty
  * KeyMetadataLength  2
  * AlgorithmId        2
- * FooterLength       4
+ * FooterLength       4     footer length including the auth tag, excluding the tag table
  * MagicBytes         4
  *
  */
@@ -46,47 +46,44 @@ public class EncryptionFooter {
     private static final Logger LOGGER = LogManager.getLogger(EncryptionFooter.class);
 
     private final byte[] messageId;
-    private final List<byte[]> gcmTags;
-    private final long frameSize;
-    private final int frameSizePower;
     private final short algorithmId;
     private final byte[] keyMetadata; // Currently empty - key data retrieved from keyfile
     private byte[] footerAuthTag; // 16-byte GCM auth tag for footer authentication
-    private int frameCount;
+    private long dataLength;
     private int footerLength;
 
-    public EncryptionFooter(byte[] messageId, long frameSize, short algorithmId) {
+    public EncryptionFooter(byte[] messageId, short algorithmId) {
         if (messageId.length != EncryptionMetadataTrailer.MESSAGE_ID_SIZE) {
             throw new IllegalArgumentException("MessageId must be 16 bytes");
         }
-        if ((frameSize & (frameSize - 1)) != 0 || frameSize <= 0) {
-            throw new IllegalArgumentException("frameSize must be a power of 2");
-        }
         this.messageId = Arrays.copyOf(messageId, EncryptionMetadataTrailer.MESSAGE_ID_SIZE);
-        this.gcmTags = new ArrayList<>();
-        this.frameSize = frameSize;
-        this.frameSizePower = Long.numberOfTrailingZeros(frameSize);
         this.algorithmId = algorithmId;
         this.keyMetadata = new byte[0]; // Empty - currently using keyfile for key data
-        this.frameCount = 0;
+        this.dataLength = 0;
         this.footerLength = 0;
     }
 
-    public static EncryptionFooter generateNew(long frameSize, short algorithmId) {
+    public static EncryptionFooter generateNew(short algorithmId) {
         byte[] messageId = new byte[EncryptionMetadataTrailer.MESSAGE_ID_SIZE];
         new SecureRandom().nextBytes(messageId);
-        return new EncryptionFooter(messageId, frameSize, algorithmId);
+        return new EncryptionFooter(messageId, algorithmId);
     }
 
     public void setFooterLength(int footerLength) {
         this.footerLength = footerLength;
     }
 
+    /** Length of the footer itself, excluding the chunk tag table that precedes it. */
     public int getFooterLength() {
         return footerLength;
     }
 
-    public byte[] serialize(Path filePath, byte[] fileKey) throws IOException {
+    /** Bytes after the data: the chunk tag table plus the footer. */
+    public long getTrailerLength() {
+        return ChunkCipher.tagTableLength(dataLength) + footerLength;
+    }
+
+    public byte[] serialize(byte[] fileKey) throws IOException {
 
         // Build footer data without auth tag
         byte[] footerData = buildFooterDataWithoutAuthTag();
@@ -105,23 +102,11 @@ public class EncryptionFooter {
     }
 
     private byte[] buildFooterDataWithoutAuthTag() {
-        int footerSize = EncryptionMetadataTrailer.MIN_FOOTER_SIZE - EncryptionMetadataTrailer.FOOTER_AUTH_TAG_SIZE + (gcmTags.size()
-            * AesGcmCipherFactory.GCM_TAG_LENGTH) + keyMetadata.length;
+        int footerSize = EncryptionMetadataTrailer.calculateFooterSize(keyMetadata.length) - EncryptionMetadataTrailer.FOOTER_AUTH_TAG_SIZE;
         ByteBuffer buffer = ByteBuffer.allocate(footerSize);
 
-        // Write GCM tags
-        for (byte[] tag : gcmTags) {
-            buffer.put(tag);
-        }
-
-        // Write tag count
-        buffer.putInt(gcmTags.size());
-
-        // Write frame size
-        buffer.putLong(frameSize);
-
-        // Write frame count
-        buffer.putInt(frameCount);
+        buffer.putLong(dataLength);
+        buffer.putInt(ChunkCipher.CHUNK_SIZE);
 
         // Write MessageId
         buffer.put(messageId);
@@ -187,38 +172,30 @@ public class EncryptionFooter {
         pos -= EncryptionMetadataTrailer.MESSAGE_ID_SIZE;
         byte[] messageId = Arrays.copyOfRange(footerData, pos, pos + EncryptionMetadataTrailer.MESSAGE_ID_SIZE);
 
-        // Read frame count
-        pos -= EncryptionMetadataTrailer.FRAME_COUNT_SIZE;
-        int frameCount = ByteBuffer.wrap(footerData, pos, EncryptionMetadataTrailer.FRAME_COUNT_SIZE).getInt();
+        // Read chunk size
+        pos -= EncryptionMetadataTrailer.CHUNK_SIZE_SIZE;
+        int chunkSize = ByteBuffer.wrap(footerData, pos, EncryptionMetadataTrailer.CHUNK_SIZE_SIZE).getInt();
+        if (chunkSize != ChunkCipher.CHUNK_SIZE) {
+            throw new IOException("Unsupported chunk size " + chunkSize + ", expected " + ChunkCipher.CHUNK_SIZE);
+        }
 
-        // Read frame size
-        pos -= EncryptionMetadataTrailer.FRAME_SIZE_SIZE;
-        long frameSize = ByteBuffer.wrap(footerData, pos, EncryptionMetadataTrailer.FRAME_SIZE_SIZE).getLong();
-
-        // Read tag count
-        pos -= EncryptionMetadataTrailer.TAG_COUNT_SIZE;
-        int tagCount = ByteBuffer.wrap(footerData, pos, EncryptionMetadataTrailer.TAG_COUNT_SIZE).getInt();
+        // Read data length
+        pos -= EncryptionMetadataTrailer.DATA_LENGTH_SIZE;
+        long dataLength = ByteBuffer.wrap(footerData, pos, EncryptionMetadataTrailer.DATA_LENGTH_SIZE).getLong();
+        if (dataLength < 0) {
+            throw new IOException("Invalid data length " + dataLength);
+        }
 
         // Validate footer length
-        int expectedLength = EncryptionMetadataTrailer.MIN_FOOTER_SIZE + (tagCount * AesGcmCipherFactory.GCM_TAG_LENGTH)
-            + keyMetadataLength;
-        if (footerLength != expectedLength) {
+        int expectedLength = EncryptionMetadataTrailer.calculateFooterSize(keyMetadataLength);
+        if (footerLength != expectedLength || fileBytes.length != expectedLength) {
             throw new IOException("Footer length mismatch: expected " + expectedLength + ", got " + footerLength);
         }
 
-        // Create footer and read GCM tags
-        EncryptionFooter footer = new EncryptionFooter(messageId, frameSize, algorithmId);
-        footer.frameCount = frameCount;
+        EncryptionFooter footer = new EncryptionFooter(messageId, algorithmId);
+        footer.dataLength = dataLength;
         footer.footerAuthTag = authTag;
         footer.setFooterLength(footerLength);
-        int tagStartPos = footerData.length - (footerLength - EncryptionMetadataTrailer.FOOTER_AUTH_TAG_SIZE);
-
-        for (int i = 0; i < tagCount; i++) {
-            int tagPos = tagStartPos + (i * AesGcmCipherFactory.GCM_TAG_LENGTH);
-            byte[] tag = Arrays.copyOfRange(footerData, tagPos, tagPos + AesGcmCipherFactory.GCM_TAG_LENGTH);
-            footer.addGcmTag(tag);
-        }
-
         return footer;
     }
 
@@ -247,27 +224,16 @@ public class EncryptionFooter {
         return Arrays.copyOf(messageId, EncryptionMetadataTrailer.MESSAGE_ID_SIZE);
     }
 
-    public void addGcmTag(byte[] tag) throws IOException {
-        if (tag.length != AesGcmCipherFactory.GCM_TAG_LENGTH) {
-            throw new IOException("Invalid GCM tag length: " + tag.length);
+    /** Plaintext length of the file; also the offset of the chunk tag table. */
+    public long getDataLength() {
+        return dataLength;
+    }
+
+    public void setDataLength(long dataLength) {
+        if (dataLength < 0) {
+            throw new IllegalArgumentException("dataLength must not be negative: " + dataLength);
         }
-        gcmTags.add(Arrays.copyOf(tag, tag.length));
-    }
-
-    public long getFrameSize() {
-        return frameSize;
-    }
-
-    public int getFrameSizePower() {
-        return frameSizePower;
-    }
-
-    public int getFrameCount() {
-        return frameCount;
-    }
-
-    public void setFrameCount(int frameCount) {
-        this.frameCount = frameCount;
+        this.dataLength = dataLength;
     }
 
     public short getAlgorithmId() {
@@ -310,8 +276,8 @@ public class EncryptionFooter {
     }
 
     /**
-     * Maximum footer size to read in single I/O operation.
-     * Covers files up to ~16TB with 32GB frames (512 frames × 16 bytes/tag + overhead)
+     * Maximum footer size to read in single I/O operation. The footer has a fixed size plus
+     * key metadata; chunk tags live in the tag table before it.
      */
     private static final int MAX_FOOTER_READ_SIZE = 8192; // 8KB
 
@@ -370,6 +336,9 @@ public class EncryptionFooter {
         int footerLength = calculateFooterLength(bufferArray, minFooterStart);
 
         // Validate we read enough data
+        if (footerLength < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+            throw new IOException("Invalid footer length " + footerLength + " in " + normalizedFilePath);
+        }
         if (footerLength > readSize) {
             throw new IOException(
                 "Footer length "
@@ -390,6 +359,14 @@ public class EncryptionFooter {
 
         // Deserialize footer with file key for authentication
         EncryptionFooter footer = deserialize(footerBytes, fileKey);
+
+        // DataLength is authenticated, so this catches truncated or extended files
+        long expectedFileSize = footer.getDataLength() + footer.getTrailerLength();
+        if (fileSize != expectedFileSize) {
+            throw new IOException(
+                "Encrypted file size " + fileSize + " does not match its footer (expected " + expectedFileSize + "): " + normalizedFilePath
+            );
+        }
         encryptionMetadataCache.getOrLoadMetadata(normalizedFilePath, footer, masterKey);
         return footer;
     }

@@ -6,9 +6,9 @@ package org.opensearch.index.store.block_loader;
 
 import static org.opensearch.index.store.block_loader.DirectIOReaderUtil.directIOReadAligned;
 import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_MASK;
-import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_SIZE;
 import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_SIZE_POWER;
 
+import java.io.EOFException;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
@@ -22,11 +22,15 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.concurrent.TimeUnit;
 
+import javax.crypto.AEADBadTagException;
+import javax.crypto.spec.SecretKeySpec;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.index.CorruptIndexException;
 import org.opensearch.index.store.block.RefCountedMemorySegment;
+import org.opensearch.index.store.cipher.ChunkCipher;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
-import org.opensearch.index.store.cipher.MemorySegmentDecryptor;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
@@ -38,12 +42,14 @@ import org.opensearch.index.store.pool.Pool;
  *
  * <p>This loader combines high-performance Direct I/O with transparent decryption to provide
  * efficient access to encrypted file data. It reads blocks directly from storage, bypassing
- * the OS buffer cache, then decrypts the data in memory using the configured key and IV resolver.
+ * the OS buffer cache, together with their tags from the file's tag table. Each block is one
+ * {@link ChunkCipher} chunk and is authenticated as it is decrypted into its pool segment; a block
+ * that fails authentication raises {@link CorruptIndexException}.
  *
  * <p>Key features:
  * <ul>
  * <li>Direct I/O for high performance and reduced memory pressure</li>
- * <li>Automatic in-place decryption of loaded blocks</li>
+ * <li>Authenticated decryption of every loaded block</li>
  * <li>Memory pool integration for efficient buffer management</li>
  * <li>Block-aligned operations for optimal storage performance</li>
  * <li>Cached FileChannels via {@link FileChannelCache} to avoid per-load open/close overhead</li>
@@ -96,59 +102,69 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         }
 
         RefCountedMemorySegment[] result = new RefCountedMemorySegment[(int) blockCount];
-        long readLength = blockCount << CACHE_BLOCK_SIZE_POWER;
         String normalizedPath = filePath.toAbsolutePath().normalize().toString();
 
         // Take the pool segments before any I/O. Under pool pressure the block cache retries this load,
         // and failing here keeps each retry from re-reading and re-decrypting the block.
         acquireSegments(result, poolTimeoutMs);
         boolean success = false;
+        long chunk = -1;
 
         try (Arena arena = Arena.ofConfined()) {
-            MemorySegment readBytes = readAligned(normalizedPath, filePath, startOffset, readLength, arena);
-            long bytesRead = readBytes.byteSize();
-
             byte[] masterKey = keyResolver.getDataKey().getEncoded();
 
             // Get footer from disk and load metadata (footer + derived key) atomically into cache
             EncryptionFooter footer = readFooterFromDisk(normalizedPath, filePath, masterKey);
-
-            // Get or create metadata atomically - ensures footer and key are always consistent
             var metadata = encryptionMetadataCache.getOrLoadMetadata(normalizedPath, footer, masterKey);
-            byte[] messageId = metadata.getFooter().getMessageId();
-            byte[] fileKey = metadata.getFileKey();
+            long dataLength = metadata.getFooter().getDataLength();
+            SecretKeySpec fileKey = new SecretKeySpec(metadata.getFileKey(), "AES");
 
-            // Use frame-based decryption with derived file key
-            MemorySegmentDecryptor
-                .decryptInPlaceFrameBased(
-                    readBytes.address(),
-                    readBytes.byteSize(),
-                    fileKey,
-                    masterKey,
-                    messageId,
-                    EncryptionMetadataTrailer.DEFAULT_FRAME_SIZE,
-                    startOffset,
-                    normalizedPath,
-                    encryptionMetadataCache
+            // The footer may come from the cache, so check the size here too: truncation is corruption.
+            long expectedSize = dataLength + metadata.getFooter().getTrailerLength();
+            long actualSize = Files.size(filePath);
+            if (actualSize != expectedSize) {
+                throw new CorruptIndexException(
+                    "encrypted file size " + actualSize + " does not match its footer (" + expectedSize + ")",
+                    filePath.toString()
                 );
-
-            if (bytesRead == 0) {
-                throw new java.io.EOFException("Unexpected EOF or empty read at offset " + startOffset + " for file " + filePath);
             }
 
-            int blockIndex = 0;
-            long bytesCopied = 0;
-            while (blockIndex < blockCount && bytesCopied < bytesRead) {
-                int toCopy = (int) Math.min(CACHE_BLOCK_SIZE, bytesRead - bytesCopied);
-                MemorySegment.copy(readBytes, bytesCopied, result[blockIndex].segment(), 0, toCopy);
-                blockIndex++;
-                bytesCopied += toCopy;
+            if (startOffset >= dataLength) {
+                throw new EOFException("Read at offset " + startOffset + " is past the end (" + dataLength + ") of " + filePath);
+            }
+
+            // One cache block is one chunk (StaticConfigs ties the sizes). Blocks past the end of the data are left null.
+            long firstChunk = startOffset >>> ChunkCipher.CHUNK_SIZE_POWER;
+            int chunks = (int) Math.min(blockCount, ChunkCipher.chunkCount(dataLength) - firstChunk);
+            long readLength = Math.min((long) chunks << CACHE_BLOCK_SIZE_POWER, dataLength - startOffset);
+            long tagsLength = (long) chunks * ChunkCipher.TAG_LENGTH;
+
+            MemorySegment ciphertext = readAligned(normalizedPath, filePath, startOffset, readLength, arena);
+            MemorySegment tags = readAligned(normalizedPath, filePath, dataLength + firstChunk * ChunkCipher.TAG_LENGTH, tagsLength, arena);
+            if (ciphertext.byteSize() != readLength || tags.byteSize() != tagsLength) {
+                throw new EOFException("Unexpected EOF reading " + chunks + " chunks at offset " + startOffset + " of " + filePath);
+            }
+
+            for (int blockIndex = 0; blockIndex < chunks; blockIndex++) {
+                chunk = firstChunk + blockIndex;
+                int length = ChunkCipher.chunkLength(chunk, dataLength);
+                long position = (long) blockIndex << CACHE_BLOCK_SIZE_POWER;
+                ChunkCipher
+                    .open(
+                        fileKey,
+                        chunk,
+                        ciphertext.asSlice(position, length).asByteBuffer(),
+                        tags.asSlice((long) blockIndex * ChunkCipher.TAG_LENGTH, ChunkCipher.TAG_LENGTH).asByteBuffer(),
+                        result[blockIndex].segment().asSlice(0, length).asByteBuffer()
+                    );
             }
             // Short read at EOF: hand back the segments that got no data
-            releaseHandles(result, blockIndex, result.length);
+            releaseHandles(result, chunks, result.length);
 
             success = true;
             return result;
+        } catch (AEADBadTagException e) {
+            throw new CorruptIndexException("encrypted chunk " + chunk + " failed authentication", filePath.toString(), e);
         } catch (NoSuchFileException e) {
             throw e;
         } catch (ClosedByInterruptException e) {
@@ -156,7 +172,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             LOGGER.debug("Bulk read interrupted: path={} offset={}", filePath, startOffset);
             throw e;
         } catch (Exception e) {
-            LOGGER.error("Bulk read failed: path={} offset={} length={} err={}", filePath, startOffset, readLength, e.toString());
+            LOGGER.error("Bulk read failed: path={} offset={} blocks={} err={}", filePath, startOffset, blockCount, e.toString());
             throw e;
         } finally {
             if (!success) {
@@ -164,7 +180,6 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             }
         }
     }
-
     /**
      * Reads through the shared cached channel. Another thread that is interrupted while reading the
      * same file closes the channel for everyone (FileChannel is interruptible), which surfaces here as
