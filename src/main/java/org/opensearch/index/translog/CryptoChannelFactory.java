@@ -14,6 +14,7 @@ import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.apache.lucene.util.IOUtils;
 import org.opensearch.index.store.key.KeyResolver;
 
 /**
@@ -57,14 +58,23 @@ public class CryptoChannelFactory implements ChannelFactory {
         }
 
         Set<OpenOption> optionSet = Set.of(options);
+        if (optionSet.contains(StandardOpenOption.APPEND)) {
+            // The wrapper writes at explicit physical offsets past the hidden magic and nonce.
+            throw new IllegalArgumentException("APPEND is not supported for encrypted translog files: " + path);
+        }
         // A file opened read-only already exists; if it was downloaded from the remote store it is
         // plaintext and gets encrypted under this node's key before it is read.
         if (optionSet.contains(StandardOpenOption.WRITE) == false
-            && optionSet.contains(StandardOpenOption.APPEND) == false
             && CryptoFileChannelWrapper.encryptIfPlaintext(path, keyResolver, translogUUID)) {
             logger.info("Encrypted plaintext translog file {} (downloaded from the remote store)", path.getFileName());
         }
 
-        return new CryptoFileChannelWrapper(FileChannel.open(path, options), keyResolver, path, optionSet, translogUUID);
+        FileChannel baseChannel = FileChannel.open(path, options);
+        try {
+            return new CryptoFileChannelWrapper(baseChannel, keyResolver, path, optionSet, translogUUID);
+        } catch (IOException | RuntimeException e) {
+            IOUtils.closeWhileHandlingException(baseChannel);
+            throw e;
+        }
     }
 }

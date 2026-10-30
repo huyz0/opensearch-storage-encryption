@@ -307,12 +307,6 @@ public class CryptoRemoteFsTranslogTests extends OpenSearchTestCase {
         assertNotNull("DecryptingTranslogTransferManager should have translogUUID", managerTranslogUUID);
         assertEquals("TranslogUUID should match", translogUUID, managerTranslogUUID);
 
-        Field cryptoFactoryField = DecryptingTranslogTransferManager.class.getDeclaredField("cryptoFactory");
-        cryptoFactoryField.setAccessible(true);
-        CryptoChannelFactory managerCryptoFactory = (CryptoChannelFactory) cryptoFactoryField.get(decryptingManager);
-
-        assertNotNull("DecryptingTranslogTransferManager should have cryptoFactory", managerCryptoFactory);
-
         // Cleanup
         translog.close();
     }

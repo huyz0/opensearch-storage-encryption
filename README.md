@@ -83,7 +83,7 @@ A node-wide cache built on Caffeine holds decrypted 8 KB blocks for `BufferPoolD
 #### Encryption Engine
 Index files are sealed with AES-256-GCM by `ChunkCipher` in independent 8 KiB chunks, one chunk per block-cache block. A file is laid out as `[ciphertext][one 16-byte tag per chunk][footer]`; the ciphertext is the same length as the plaintext, so offsets don't move. The footer holds the message ID and the plaintext length and is itself authenticated, so truncation is detected. Both read paths (`CryptoBufferedIndexInput` for NIOFS and `CryptoDirectIOBlockLoader` for the buffer pool) read whole chunks with their tags and verify them before any plaintext is used; a chunk that fails is reported as `CorruptIndexException`. `AesGcmCipherFactory` holds the GCM helpers used by the footer.
 
-Translog files keep core's header in plaintext, followed by a 4-byte magic, a random 16-byte nonce per file, and the operation data encrypted with offset-keyed AES-256-CTR under the index data key (`CryptoFileChannelWrapper`, `TranslogCipher`). Any byte range can be decrypted on its own, so reads work while a generation is still being written and everything written before a crash stays readable. Each node has its own data key, so translog files are uploaded to the remote store decrypted; a downloaded file is encrypted under the local key the first time it is opened, so it sits on local disk in plaintext between the download and that open (normally the shard recovery that follows straight after).
+Translog files keep core's header in plaintext, followed by a 4-byte magic, a random 16-byte nonce per file, and the operation data encrypted with offset-keyed AES-256-CTR under a per-file key derived with HKDF from the index data key and that nonce (`CryptoFileChannelWrapper`, `TranslogCipher`). The magic is `OST2`; files in any other format are rejected. Any byte range can be decrypted on its own, so reads work while a generation is still being written and everything written before a crash stays readable. Each node has its own data key, so translog files are uploaded to the remote store decrypted; a downloaded file is encrypted under the local key the first time it is opened, so it sits on local disk in plaintext between the download and that open (normally the shard recovery that follows straight after).
 
 #### Memory Management
 Efficient memory management is achieved through `MemorySegmentPool`, which provides pooling of off-heap memory segments. `RefCountedMemorySegment` ensures safe concurrent access through reference counting. The system supports configurable pool sizes and warmup strategies to optimize resource utilization.
@@ -363,7 +363,7 @@ Use `-Pjmh.includes` to run a specific benchmark method (regex match):
 The plugin has no release yet and is not ready for production use. The items below are open issues with the current code, not design goals.
 
 ### Known security issues
-- **Translog integrity.** Translog data is encrypted with AES-CTR, which hides its contents but does not detect tampering beyond core's per-operation checksums.
+- **Translog integrity.** Translog data is not authenticated yet. It is encrypted with AES-CTR, which hides its contents; core's per-operation checksums catch accidental corruption, not deliberate changes.
 - **Footer not bound to its file.** The footer does not include the index, shard or file name, so swapping or rolling back whole files is not detected.
 
 ### Durability and availability

@@ -258,7 +258,8 @@ public class RemoteTranslogDownloadTests extends OpenSearchTestCase {
 
         Path replicaDir = createTempDir();
         try (Stream<Path> files = Files.list(primaryDir)) {
-            for (Path file : files.toList()) {
+            // Only regular files: Lucene's test filesystem may add an "extra0" directory.
+            for (Path file : files.filter(Files::isRegularFile).toList()) {
                 String name = file.getFileName().toString();
                 Files
                     .write(
