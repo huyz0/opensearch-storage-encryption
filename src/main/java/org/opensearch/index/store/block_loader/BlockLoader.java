@@ -100,7 +100,8 @@ public interface BlockLoader<T> {
      * @param startOffset starting file offset (should be block-aligned)
      * @param blockCount number of blocks to read
      * @param poolTimeoutMs timeout in milliseconds for acquiring pool segments
-     *                      (use 50ms for prefetch, 5000ms for on-demand loads)
+     *                      (50ms for bulk prefetch; {@link #CACHE_LOAD_POOL_TIMEOUT_MS} for loads
+     *                      made under the block cache's lock)
      * @return array of loaded memory segments (length equals blockCount)
      * @throws Exception if loading fails due to I/O errors, pool pressure, or other issues
      */
@@ -120,14 +121,23 @@ public interface BlockLoader<T> {
     }
 
     /**
-     * Loads a single block using the provided cache key.
+     * Pool wait used by {@link #load(BlockCacheKey)}. The block cache calls that method while holding
+     * its map lock, so it must not wait long; when the pool is exhausted it fails with
+     * {@link PoolAcquireFailedException} and the cache frees space and retries outside the lock.
+     */
+    long CACHE_LOAD_POOL_TIMEOUT_MS = 5;
+
+    /**
+     * Loads a single block using the provided cache key. Waits at most
+     * {@link #CACHE_LOAD_POOL_TIMEOUT_MS} for a pool segment.
      *
      * @param key the cache key identifying the block to load
      * @return the loaded block data
+     * @throws PoolAcquireFailedException if no pool segment became free in time
      * @throws Exception if loading fails due to I/O errors, pool pressure, or other issues
      */
     default T load(BlockCacheKey key) throws Exception {
-        T[] result = load(key.filePath(), key.offset(), 1);  // Load 1 block
+        T[] result = load(key.filePath(), key.offset(), 1, CACHE_LOAD_POOL_TIMEOUT_MS);  // Load 1 block
         if (result.length == 0 || result[0] == null) {
             throw new IOException("Failed to load block for key: " + key);
         }
