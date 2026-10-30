@@ -122,15 +122,6 @@ public class BufferPoolDirectoryTests extends OpenSearchTestCase {
     }
 
     /**
-     * Verifies that close() calls super.close() so that ensureOpen() throws
-     * AlreadyClosedException on subsequent operations. Without super.close(),
-     * the directory appears open and operations silently proceed on stale state.
-     *
-     * We test via createTempOutput since its ensureOpen() call is not wrapped in
-     * a catch block that calls CryptoMetricsService (which isn't initialized in
-     * unit tests).
-     */
-    /**
      * The read-ahead worker is shared by every directory on the node, so closing one
      * directory (shard close, relocation, deletion) must not stop it for the others.
      */
@@ -143,6 +134,15 @@ public class BufferPoolDirectoryTests extends OpenSearchTestCase {
         assertTrue("Shared read-ahead worker must survive a directory close", worker.isRunning());
     }
 
+    /**
+     * Verifies that close() calls super.close() so that ensureOpen() throws
+     * AlreadyClosedException on subsequent operations. Without super.close(),
+     * the directory appears open and operations silently proceed on stale state.
+     *
+     * We test via createTempOutput since its ensureOpen() call is not wrapped in
+     * a catch block that calls CryptoMetricsService (which isn't initialized in
+     * unit tests).
+     */
     public void testCloseMarksDirectoryAsClosed() throws Exception {
         // Close the directory
         directory.close();
