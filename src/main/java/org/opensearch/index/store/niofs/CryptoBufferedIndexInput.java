@@ -30,7 +30,7 @@ import org.opensearch.index.store.key.KeyResolver;
  * An IndexInput implementation that decrypts and authenticates data for reading.
  *
  * <p>Reads go through whole {@link ChunkCipher} chunks: each chunk is read with its tag from the
- * tag table, verified, and kept until a read moves to another chunk. A chunk that fails
+ * tag table and verified. The last verified chunk is kept per thread, so clones allocate nothing. A chunk that fails
  * verification raises {@link CorruptIndexException}.
  *
  * @opensearch.internal
@@ -48,11 +48,20 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     private final long dataLength;
     private final SecretKeySpec keySpec;
 
-    // Per-instance chunk state, allocated on first read. Clones get their own.
-    private ByteBuffer ciphertext;
-    private ByteBuffer tag;
-    private ByteBuffer plaintext;
-    private long cachedChunk = -1;
+    /**
+     * Per-thread chunk buffers and the last chunk decrypted on this thread. Lucene creates many
+     * short-lived clones, so buffers are not allocated per clone. The cached chunk is keyed by the
+     * file's {@code keySpec} instance, which the opening input shares with all its clones and slices.
+     */
+    private static final class ChunkScratch {
+        final ByteBuffer ciphertext = ByteBuffer.allocate(ChunkCipher.CHUNK_SIZE);
+        final ByteBuffer tag = ByteBuffer.allocate(ChunkCipher.TAG_LENGTH);
+        final ByteBuffer plaintext = ByteBuffer.allocate(ChunkCipher.CHUNK_SIZE);
+        Object file;
+        long chunk = -1;
+    }
+
+    private static final ThreadLocal<ChunkScratch> SCRATCH = ThreadLocal.withInitial(ChunkScratch::new);
 
     public CryptoBufferedIndexInput(
         String resourceDesc,
@@ -112,10 +121,6 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     public CryptoBufferedIndexInput clone() {
         CryptoBufferedIndexInput clone = (CryptoBufferedIndexInput) super.clone();
         clone.ownsChannel = false;
-        clone.ciphertext = null;
-        clone.tag = null;
-        clone.plaintext = null;
-        clone.cachedChunk = -1;
         return clone;
     }
 
@@ -149,9 +154,10 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             throw new EOFException("read past EOF: pos=" + pos + ", end=" + end + ": " + this);
         }
 
+        ChunkScratch scratch = SCRATCH.get();
         while (b.hasRemaining()) {
             long chunk = pos >>> ChunkCipher.CHUNK_SIZE_POWER;
-            loadChunk(chunk);
+            ByteBuffer plaintext = loadChunk(scratch, chunk);
             int offsetInChunk = (int) (pos & CHUNK_MASK);
             int n = Math.min(b.remaining(), plaintext.limit() - offsetInChunk);
             b.put(b.position(), plaintext, offsetInChunk, n);
@@ -160,31 +166,29 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         }
     }
 
-    /** Reads, verifies and decrypts {@code chunk} into {@link #plaintext}, unless it is already there. */
-    private void loadChunk(long chunk) throws IOException {
-        if (chunk == cachedChunk) {
-            return;
+    /** Reads, verifies and decrypts {@code chunk} into the thread's scratch, unless it is already there. */
+    private ByteBuffer loadChunk(ChunkScratch scratch, long chunk) throws IOException {
+        if (scratch.file == keySpec && scratch.chunk == chunk) {
+            return scratch.plaintext;
         }
-        if (plaintext == null) {
-            ciphertext = ByteBuffer.allocate(ChunkCipher.CHUNK_SIZE);
-            tag = ByteBuffer.allocate(ChunkCipher.TAG_LENGTH);
-            plaintext = ByteBuffer.allocate(ChunkCipher.CHUNK_SIZE);
-        }
-        cachedChunk = -1;
+        scratch.file = null;
+        scratch.chunk = -1;
 
         int length = ChunkCipher.chunkLength(chunk, dataLength);
-        readFully(ciphertext.clear().limit(length), chunk << ChunkCipher.CHUNK_SIZE_POWER);
-        readFully(tag.clear(), dataLength + chunk * ChunkCipher.TAG_LENGTH);
+        readFully(scratch.ciphertext.clear().limit(length), chunk << ChunkCipher.CHUNK_SIZE_POWER);
+        readFully(scratch.tag.clear(), dataLength + chunk * ChunkCipher.TAG_LENGTH);
 
         try {
-            ChunkCipher.open(keySpec, chunk, ciphertext.flip(), tag.flip(), plaintext.clear());
+            ChunkCipher.open(keySpec, chunk, scratch.ciphertext.flip(), scratch.tag.flip(), scratch.plaintext.clear());
         } catch (AEADBadTagException e) {
             throw new CorruptIndexException("encrypted chunk " + chunk + " failed authentication", this, e);
         } catch (GeneralSecurityException e) {
             throw new IOException("Failed to decrypt chunk " + chunk + ": " + this, e);
         }
-        plaintext.flip();
-        cachedChunk = chunk;
+        scratch.plaintext.flip();
+        scratch.file = keySpec;
+        scratch.chunk = chunk;
+        return scratch.plaintext;
     }
 
     @SuppressForbidden(reason = "FileChannel#read is efficient and used intentionally")
