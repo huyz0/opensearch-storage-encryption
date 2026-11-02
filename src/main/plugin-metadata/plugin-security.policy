@@ -1,5 +1,11 @@
-
 grant {
     // kms client opens socket connections for to kms
     permission java.net.SocketPermission "*", "connect,resolve";
+
+    // AWS-LC FIPS module (FIPS build only): seeds from /dev/urandom, and unpacks its native library into a
+    // fresh temporary directory, loads it, then deletes it.
+    permission java.io.FilePermission "/dev/urandom", "read";
+    permission java.io.FilePermission "${java.io.tmpdir}", "read,write";
+    permission java.io.FilePermission "${java.io.tmpdir}/-", "read,write,delete";
+    permission java.lang.RuntimePermission "loadLibrary.*";
 };

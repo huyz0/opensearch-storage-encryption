@@ -56,15 +56,33 @@ public class CryptoProvidersTests extends OpenSearchTestCase {
         expectThrows(IllegalStateException.class, () -> CryptoProviders.selfTest(SUN));
     }
 
+    public void testCtrSelfTestPassesWithChosenCtrProvider() {
+        CryptoProviders.selfTestCtr(CryptoProviders.ctrProvider());
+        expectThrows(IllegalStateException.class, () -> CryptoProviders.selfTestCtr(SUN));
+    }
+
+    public void testFipsModePrefersAwsLcWhenItLoads() {
+        Provider awsLc = new Provider(CryptoProviders.AWS_LC_PROVIDER, "1", "stub") {
+        };
+        assertSame(awsLc, CryptoProviders.preferAwsLc(BC, awsLc));
+        assertSame(BC, CryptoProviders.preferAwsLc(BC, null));
+    }
+
     /** In a FIPS build every test JVM runs approved-only, so this checks the build wiring end to end. */
     public void testFipsBuildRunsOnFipsProvider() {
         assertEquals(CryptoProviders.isFipsBuild(), CryptoProviders.isApprovedOnlyMode());
         assertEquals(CryptoProviders.isFipsBuild(), CryptoProviders.isFipsMode());
-        String expected = CryptoProviders.isFipsBuild() ? CryptoProviders.FIPS_PROVIDER : CryptoProviders.DEFAULT_PROVIDER;
-        assertEquals(expected, CryptoProviders.provider().getName());
-        assertEquals(expected, ChunkCipher.newCipher().getProvider().getName());
         if (CryptoProviders.isFipsBuild()) {
-            assertEquals(CryptoProviders.FIPS_PROVIDER, CryptoProviders.secureRandom().getProvider().getName());
+            // The FIPS build bundles AWS-LC; AES-CTR (translog) stays on Bouncy Castle FIPS.
+            assertEquals(CryptoProviders.AWS_LC_PROVIDER, CryptoProviders.provider().getName());
+            assertTrue(CryptoProviders.isAwsLc());
+            assertEquals(CryptoProviders.FIPS_PROVIDER, CryptoProviders.ctrProvider().getName());
+            assertEquals(CryptoProviders.AWS_LC_PROVIDER, CryptoProviders.secureRandom().getProvider().getName());
+        } else {
+            assertEquals(CryptoProviders.DEFAULT_PROVIDER, CryptoProviders.provider().getName());
+            assertEquals(CryptoProviders.DEFAULT_PROVIDER, CryptoProviders.ctrProvider().getName());
+            assertFalse(CryptoProviders.isAwsLc());
         }
+        assertEquals(CryptoProviders.provider().getName(), ChunkCipher.newCipher().getProvider().getName());
     }
 }

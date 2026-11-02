@@ -239,6 +239,12 @@ def generateCryptoStandard = tasks.register('generateCryptoStandard') {
 }
 sourceSets.main.resources.srcDir(files(generatedBuildInfo).builtBy(generateCryptoStandard))
 
+// AWS-LC ships one jar per architecture: -Paccp.classifier=linux-x86_64|linux-aarch_64, default the build host's.
+def accpVersion = '2.5.0'
+def accpClassifier = (project.findProperty('accp.classifier') ?: (
+    System.getProperty('os.arch') in ['aarch64', 'arm64'] ? 'linux-aarch_64' : 'linux-x86_64'
+)).toString()
+
 if (fipsBuild) {
     configurations {
         fipsJars { canBeConsumed = false; canBeResolved = true; transitive = false }
@@ -250,7 +256,12 @@ if (fipsBuild) {
         fipsJars "org.bouncycastle:bc-fips:${versions.bouncycastle_jce}"
         fipsJars "org.bouncycastle:bctls-fips:${versions.bouncycastle_tls}"
         fipsJars "org.bouncycastle:bcutil-fips:${versions.bouncycastle_util}"
+        // AWS-LC FIPS module (Amazon Corretto Crypto Provider, FIPS build). The plugin prefers it in FIPS mode
+        // for AES-GCM, HMAC, key derivation and the DRBG; it has no AES-CTR, so the translog stays on BC-FIPS.
+        implementation "software.amazon.cryptools:AmazonCorrettoCryptoProvider-FIPS:${accpVersion}:${accpClassifier}"
     }
+    // The AWS-LC jars hold a native library for one architecture, so the plugin zip is per architecture.
+    tasks.named('bundlePlugin').configure { archiveClassifier = "fips-${accpClassifier}" }
 
     // The security file OpenSearch uses in FIPS mode, and the BCFKS truststore its build tools ship.
     def fipsDir = layout.buildDirectory.dir('fips')

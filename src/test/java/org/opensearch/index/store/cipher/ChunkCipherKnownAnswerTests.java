@@ -155,12 +155,15 @@ public class ChunkCipherKnownAnswerTests extends OpenSearchTestCase {
     }
 
     public void testWriterCipherRefusesNonceReuse() throws Exception {
-        // Bouncy Castle FIPS does not track the last IV, so this extra guard exists only with SunJCE.
-        assumeFalse("only SunJCE refuses GCM key+IV reuse", CryptoProviders.isFipsMode());
+        // SunJCE and AWS-LC track the last key+IV; Bouncy Castle FIPS (the FIPS-mode fallback) does not.
+        assumeFalse(
+            "Bouncy Castle FIPS does not refuse GCM key+IV reuse",
+            CryptoProviders.isFipsMode() && CryptoProviders.isAwsLc() == false
+        );
         Cipher cipher = ChunkCipher.newCipher();
         byte[] out = new byte[100 + ChunkCipher.TAG_LENGTH];
         ChunkCipher.seal(cipher, KEY, 7, PLAINTEXT, 0, 100, out);
-        // SunJCE refuses key+IV reuse for GCM encryption ("Cannot reuse iv for GCM encryption").
+        // The provider refuses key+IV reuse for GCM encryption ("Cannot reuse iv for GCM encryption").
         expectThrows(InvalidAlgorithmParameterException.class, () -> ChunkCipher.seal(cipher, KEY, 7, PLAINTEXT, 0, 100, out));
     }
 
