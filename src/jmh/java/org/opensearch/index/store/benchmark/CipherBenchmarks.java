@@ -40,10 +40,12 @@ import org.opensearch.index.store.cipher.ChunkCipher;
  * {@link ChunkCipher} chunk (index files) and AES-CTR over a translog write.
  *
  * <p>Each benchmark processes {@code size} bytes, so JMH's {@code ops/s} times {@code size} is the
- * cipher's throughput. The open benchmarks compare the buffer shapes the read paths use: the block
- * loader decrypts from a native {@link MemorySegment} into another ({@code gcmOpenDirect}), and the
- * NIO path uses heap scratch buffers ({@code gcmOpenHeap}). Both call the cipher the way
- * {@link ChunkCipher#open} does: {@code update} with the ciphertext, then {@code doFinal} with the tag.
+ * cipher's throughput. The open benchmarks compare ways to decrypt a chunk. {@link ChunkCipher#open}
+ * stages ciphertext and tag through a heap array and makes one {@code doFinal}
+ * ({@code gcmOpenDirectViaHeap} for the block loader's native {@link MemorySegment} buffers).
+ * {@code gcmOpenDirect} and {@code gcmOpenHeap} call {@code update} with the ciphertext and then
+ * {@code doFinal} with the tag on native and heap buffers, which is how {@code open} worked before;
+ * {@code gcmOpenArrayContiguous} is one {@code doFinal} with no copies, the lower bound.
  *
  * <p>{@code provider} selects the JCE provider. Besides the JDK's SunJCE, the benchmark can load
  * Amazon Corretto Crypto Provider ({@code AmazonCorrettoCryptoProvider}, regular or FIPS build) and
@@ -203,7 +205,7 @@ public class CipherBenchmarks {
         return sealed;
     }
 
-    /** Block-loader path: native memory in, native memory out, update then doFinal(tag). */
+    /** Native memory in and out, update then doFinal(tag): the block loader before staging. */
     @Benchmark
     public ByteBuffer gcmOpenDirect() throws Exception {
         initOpen();
@@ -212,7 +214,7 @@ public class CipherBenchmarks {
         return directOut;
     }
 
-    /** NIO path: heap ByteBuffers, update then doFinal(tag). */
+    /** Heap ByteBuffers, update then doFinal(tag): the NIO path before staging. */
     @Benchmark
     public ByteBuffer gcmOpenHeap() throws Exception {
         initOpen();
@@ -230,7 +232,7 @@ public class CipherBenchmarks {
     }
 
     /**
-     * Native in, native out, staged through a heap array: copy ciphertext and tag into one
+     * What {@link ChunkCipher#open} does for native buffers: copy ciphertext and tag into one heap
      * array, one doFinal, copy the plaintext back.
      */
     @Benchmark
