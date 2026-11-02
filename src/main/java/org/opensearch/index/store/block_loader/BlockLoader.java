@@ -121,11 +121,38 @@ public interface BlockLoader<T> {
     }
 
     /**
-     * Pool wait used by {@link #load(BlockCacheKey)}. The block cache calls that method while holding
-     * its map lock, so it must not wait long; when the pool is exhausted it fails with
-     * {@link PoolAcquireFailedException} and the cache frees space and retries outside the lock.
+     * Pool wait used by {@link #load(BlockCacheKey)}: none. The block cache calls that method while
+     * holding its map lock, so it must not wait; when the pool is exhausted it fails with
+     * {@link PoolAcquireFailedException}, and the cache frees space, waits its turn outside the lock
+     * with {@link #reservePoolSegment}, and loads again.
      */
-    long CACHE_LOAD_POOL_TIMEOUT_MS = 5;
+    long CACHE_LOAD_POOL_TIMEOUT_MS = 0;
+
+    /**
+     * Waits in turn for a pool segment and holds it for the calling thread, so that thread's next load
+     * of one block does not wait. Pair every call with {@link #releasePoolReservation()}.
+     *
+     * @param timeoutMs maximum time to wait
+     * @return true if a segment is held for this thread, false on timeout
+     * @throws InterruptedException if interrupted while waiting
+     */
+    default boolean reservePoolSegment(long timeoutMs) throws InterruptedException {
+        return false;
+    }
+
+    /**
+     * Returns a segment held by {@link #reservePoolSegment} that the calling thread did not use,
+     * for example because another thread cached the block first.
+     */
+    default void releasePoolReservation() {}
+
+    /**
+     * Returns true if the pool has no free segment and cannot allocate one. A load can fail while
+     * segments are free, because it queues behind other waiters, and evicting then frees nothing needed.
+     */
+    default boolean poolExhausted() {
+        return true;
+    }
 
     /**
      * Loads a single block using the provided cache key. Waits at most

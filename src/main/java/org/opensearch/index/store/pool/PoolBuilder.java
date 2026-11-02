@@ -43,7 +43,7 @@ public final class PoolBuilder {
     /**
      * Container for shared pool resources with lifecycle management.
      * This class holds references to the shared memory segment pool, block cache,
-     * telemetry thread, cache removal executor, and read-ahead executor service,
+     * telemetry thread, and read-ahead executor service,
      * providing proper cleanup when closed.
      */
     public static class PoolResources implements Closeable {
@@ -53,7 +53,6 @@ public final class PoolBuilder {
         private final int readAheadQueueSize;
         private final Worker sharedReadaheadWorker;
         private final TelemetryThread telemetry;
-        private final java.util.concurrent.ThreadPoolExecutor removalExecutor;
         private final ExecutorService readAheadExecutor;
         private final FileChannelCache fileChannelCache;
 
@@ -64,7 +63,6 @@ public final class PoolBuilder {
             int readAheadQueueSize,
             Worker sharedReadaheadWorker,
             TelemetryThread telemetry,
-            java.util.concurrent.ThreadPoolExecutor removalExecutor,
             ExecutorService readAheadExecutor,
             FileChannelCache fileChannelCache
         ) {
@@ -74,7 +72,6 @@ public final class PoolBuilder {
             this.readAheadQueueSize = readAheadQueueSize;
             this.sharedReadaheadWorker = sharedReadaheadWorker;
             this.telemetry = telemetry;
-            this.removalExecutor = removalExecutor;
             this.readAheadExecutor = readAheadExecutor;
             this.fileChannelCache = fileChannelCache;
         }
@@ -161,17 +158,6 @@ public final class PoolBuilder {
                     sharedReadaheadWorker.close();
                 } catch (Exception e) {
                     LOGGER.warn("Error closing shared readahead worker", e);
-                }
-            }
-            if (removalExecutor != null) {
-                removalExecutor.shutdown();
-                try {
-                    if (!removalExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                        removalExecutor.shutdownNow();
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    removalExecutor.shutdownNow();
                 }
             }
             if (readAheadExecutor != null) {
@@ -291,11 +277,8 @@ public final class PoolBuilder {
         int readAheadQueueSize = ReadAheadSizingPolicy.calculateQueueSize(maxCacheBlocks);
         LOGGER.info("Calculated read-ahead queue size={} (cache={} blocks)", readAheadQueueSize, maxCacheBlocks);
 
-        // Initialize shared cache with removal listener and get its executor
-        BlockCacheBuilder.CacheWithExecutor<RefCountedMemorySegment, RefCountedMemorySegment> cacheWithExecutor = BlockCacheBuilder
-            .build(CACHE_INITIAL_SIZE, maxCacheBlocks);
-        BlockCache<RefCountedMemorySegment> blockCache = cacheWithExecutor.getCache();
-        java.util.concurrent.ThreadPoolExecutor removalExecutor = cacheWithExecutor.getExecutor();
+        // Initialize shared cache; its removal listener returns evicted segments to the pool synchronously
+        BlockCache<RefCountedMemorySegment> blockCache = BlockCacheBuilder.build(CACHE_INITIAL_SIZE, maxCacheBlocks);
         LOGGER.info("Creating shared block cache with blocks={}", maxCacheBlocks);
 
         // Calculate worker threads using principled drain-time approach
@@ -338,7 +321,6 @@ public final class PoolBuilder {
             readAheadQueueSize,
             sharedReadaheadWorker,
             telemetry,
-            removalExecutor,
             readAheadExecutor,
             fileChannelCache
         );
