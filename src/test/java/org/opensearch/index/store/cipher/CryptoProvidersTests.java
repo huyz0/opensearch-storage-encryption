@@ -56,6 +56,10 @@ public class CryptoProvidersTests extends OpenSearchTestCase {
         expectThrows(IllegalStateException.class, () -> CryptoProviders.selfTest(SUN));
     }
 
+    public void testSealNonceSelfTestPasses() {
+        CryptoProviders.selfTestSealNonce(CryptoProviders.sealProvider(), CryptoProviders.provider(), CryptoProviders.nonceRandom());
+    }
+
     public void testCtrSelfTestPassesWithChosenCtrProvider() {
         CryptoProviders.selfTestCtr(CryptoProviders.ctrProvider());
         expectThrows(IllegalStateException.class, () -> CryptoProviders.selfTestCtr(SUN));
@@ -83,6 +87,9 @@ public class CryptoProvidersTests extends OpenSearchTestCase {
             assertEquals(CryptoProviders.DEFAULT_PROVIDER, CryptoProviders.ctrProvider().getName());
             assertFalse(CryptoProviders.isAwsLc());
         }
-        assertEquals(CryptoProviders.provider().getName(), ChunkCipher.newCipher().getProvider().getName());
+        // Sealing generates the GCM nonce inside the module: Bouncy Castle FIPS in FIPS mode (see sealProvider).
+        String sealProvider = CryptoProviders.isFipsBuild() ? CryptoProviders.FIPS_PROVIDER : CryptoProviders.DEFAULT_PROVIDER;
+        assertEquals(sealProvider, CryptoProviders.sealProvider().getName());
+        assertEquals(sealProvider, ChunkCipher.newCipher().getProvider().getName());
     }
 }

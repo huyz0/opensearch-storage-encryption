@@ -84,6 +84,9 @@ public final class ChunkEncryptor {
     }
 
     private void sealChunk(OutputStream out, byte[] b, int offset, int length) throws IOException {
+        if (chunkIndex >= ChunkCipher.MAX_CHUNKS) {
+            throw new IOException("encrypted file is too large: more than " + ChunkCipher.MAX_CHUNKS + " chunks");
+        }
         try {
             ChunkCipher.seal(cipher, fileKey, chunkIndex, b, offset, length, sealed);
         } catch (GeneralSecurityException e) {

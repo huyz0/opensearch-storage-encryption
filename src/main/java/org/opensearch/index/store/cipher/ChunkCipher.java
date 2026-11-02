@@ -16,8 +16,9 @@ import javax.crypto.spec.GCMParameterSpec;
  * AES-256-GCM over fixed-size chunks of an encrypted index file.
  *
  * <p>The plaintext of a file is split into {@link #CHUNK_SIZE} chunks (the last one may be shorter).
- * Chunk {@code i} is sealed on its own with the file key, a random 12-byte nonce that the JCE provider
- * generates inside the cryptographic module, and the AAD {@code i} (big-endian {@code long}). The
+ * Chunk {@code i} is sealed on its own with the file key, a random 12-byte nonce that the
+ * {@linkplain CryptoProviders#sealProvider() seal provider} generates (inside the cryptographic module in
+ * FIPS mode), and the AAD {@code i} (big-endian {@code long}). The
  * ciphertext has the same length as the plaintext, so a plaintext offset is also the ciphertext offset.
  * Each chunk's {@link #ENTRY_LENGTH}-byte entry, {@code nonce || tag}, is stored separately in the file's
  * tag table. A reader decrypts and verifies one whole chunk at a time, so any change to the ciphertext,
@@ -60,7 +61,7 @@ public final class ChunkCipher {
      * cost far less than the decryption.
      */
     private static final class OpenScratch {
-        final Cipher cipher = newCipher();
+        final Cipher cipher = newCipher(CryptoProviders.provider());
         final byte[] sealed = new byte[CHUNK_SIZE + TAG_LENGTH];
         final byte[] nonce = new byte[NONCE_LENGTH];
         final byte[] aad = new byte[AAD_LENGTH];
@@ -71,14 +72,21 @@ public final class ChunkCipher {
 
     private ChunkCipher() {}
 
-    /** Returns a new AES/GCM cipher from {@link CryptoProviders#provider()}. Writers keep their own instance. */
+    /** Returns a new AES/GCM cipher for {@link #seal}, from {@link CryptoProviders#sealProvider()}. Writers keep their own instance. */
     public static Cipher newCipher() {
+        return newCipher(CryptoProviders.sealProvider());
+    }
+
+    private static Cipher newCipher(java.security.Provider provider) {
         try {
-            return Cipher.getInstance(TRANSFORMATION, CryptoProviders.provider());
+            return Cipher.getInstance(TRANSFORMATION, provider);
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("AES/GCM is not available", e);
         }
     }
+
+    /** Maximum chunks per file: the writer keeps the tag table in one array. About 600 GiB of data. */
+    public static final long MAX_CHUNKS = (Integer.MAX_VALUE - 64) / ENTRY_LENGTH;
 
     /** The AAD for chunk {@code chunkIndex}: the big-endian index. */
     static byte[] aad(long chunkIndex, byte[] into) {
@@ -125,8 +133,8 @@ public final class ChunkCipher {
     public static void seal(Cipher cipher, Key key, long chunkIndex, byte[] in, int inOffset, int length, byte[] out)
         throws GeneralSecurityException {
         checkLength(length);
-        // No IV given: the provider generates a random one with its approved DRBG.
-        cipher.init(Cipher.ENCRYPT_MODE, key, CryptoProviders.secureRandom());
+        // No IV given: the provider generates a random one (in FIPS mode inside the module, with its DRBG).
+        cipher.init(Cipher.ENCRYPT_MODE, key, CryptoProviders.nonceRandom());
         sealInitialized(cipher, chunkIndex, in, inOffset, length, out);
     }
 

@@ -91,9 +91,9 @@ public class EncryptionFooter {
 
         Cipher cipher;
         try {
-            // No IV given: the provider generates a random one with its approved DRBG.
-            cipher = Cipher.getInstance("AES/GCM/NoPadding", CryptoProviders.provider());
-            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(fileKey, "AES"), CryptoProviders.secureRandom());
+            // No IV given: the seal provider generates a random one (in FIPS mode inside the module).
+            cipher = Cipher.getInstance("AES/GCM/NoPadding", CryptoProviders.sealProvider());
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(fileKey, "AES"), CryptoProviders.nonceRandom());
         } catch (GeneralSecurityException e) {
             throw new IOException("Failed to initialize footer authentication", e);
         }

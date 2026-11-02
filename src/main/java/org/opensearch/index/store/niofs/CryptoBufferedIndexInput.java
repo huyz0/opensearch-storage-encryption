@@ -27,7 +27,7 @@ import org.opensearch.index.store.key.KeyResolver;
 /**
  * An IndexInput implementation that decrypts and authenticates data for reading.
  *
- * <p>Reads go through whole {@link ChunkCipher} chunks: each chunk is read with its tag from the
+ * <p>Reads go through whole {@link ChunkCipher} chunks: each chunk is read with its nonce and tag from the
  * tag table and verified. The last verified chunk is kept per thread, so clones allocate nothing. A chunk that fails
  * verification raises {@link CorruptIndexException}.
  *
@@ -53,7 +53,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
      */
     private static final class ChunkScratch {
         final ByteBuffer ciphertext = ByteBuffer.allocate(ChunkCipher.CHUNK_SIZE);
-        final ByteBuffer tag = ByteBuffer.allocate(ChunkCipher.ENTRY_LENGTH);
+        final ByteBuffer entry = ByteBuffer.allocate(ChunkCipher.ENTRY_LENGTH);
         final ByteBuffer plaintext = ByteBuffer.allocate(ChunkCipher.CHUNK_SIZE);
         Object file;
         long chunk = -1;
@@ -174,10 +174,10 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
         int length = ChunkCipher.chunkLength(chunk, dataLength);
         readFully(scratch.ciphertext.clear().limit(length), chunk << ChunkCipher.CHUNK_SIZE_POWER);
-        readFully(scratch.tag.clear(), dataLength + chunk * ChunkCipher.ENTRY_LENGTH);
+        readFully(scratch.entry.clear(), dataLength + chunk * ChunkCipher.ENTRY_LENGTH);
 
         try {
-            ChunkCipher.open(keySpec, chunk, scratch.ciphertext.flip(), scratch.tag.flip(), scratch.plaintext.clear());
+            ChunkCipher.open(keySpec, chunk, scratch.ciphertext.flip(), scratch.entry.flip(), scratch.plaintext.clear());
         } catch (AEADBadTagException e) {
             throw new CorruptIndexException("encrypted chunk " + chunk + " failed authentication", this, e);
         } catch (GeneralSecurityException e) {

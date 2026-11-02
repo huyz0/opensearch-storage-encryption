@@ -65,8 +65,11 @@ public final class CryptoProviders {
     private static final String AWS_LC_CLASS = "com.amazon.corretto.crypto.provider.AmazonCorrettoCryptoProvider";
 
     /** The providers and random source chosen for this JVM. */
-    private record Resolved(Provider provider, Provider ctrProvider, SecureRandom random, boolean fips) {
+    private record Resolved(Provider provider, Provider ctrProvider, SecureRandom random, SecureRandom fipsNonceRandom, boolean fips) {
     }
+
+    /** Non-FIPS nonce source: one per thread, so parallel writers do not contend on a shared generator. */
+    private static final ThreadLocal<SecureRandom> NONCE_RANDOM = ThreadLocal.withInitial(SecureRandom::new);
 
     /**
      * Returns the provider for AES-GCM, HMAC and key derivation. In FIPS mode this is the AWS-LC FIPS
@@ -85,6 +88,27 @@ public final class CryptoProviders {
      */
     public static Provider ctrProvider() {
         return resolve().ctrProvider;
+    }
+
+    /**
+     * Returns the provider that seals (encrypts) with AES-GCM. FIPS 140-3 IG C.H wants the GCM IV for
+     * encryption generated inside the module. Bouncy Castle FIPS does that when a cipher is initialized
+     * without an IV; the AWS-LC provider fills the IV in its Java layer and passes it to the native module
+     * as an external IV, which is outside the module boundary. So in FIPS mode sealing uses Bouncy Castle
+     * FIPS, and opening (decryption, where the IV is an input anyway) uses {@link #provider()}.
+     */
+    public static Provider sealProvider() {
+        Resolved r = resolve();
+        return r.fips ? r.ctrProvider : r.provider;
+    }
+
+    /**
+     * Random source to pass when initializing a seal cipher without an IV: the {@link #sealProvider()}'s
+     * own approved DRBG in FIPS mode, otherwise a per-thread {@link SecureRandom}.
+     */
+    public static SecureRandom nonceRandom() {
+        Resolved r = resolve();
+        return r.fips ? r.fipsNonceRandom : NONCE_RANDOM.get();
     }
 
     /** Whether {@link #provider()} is the AWS-LC FIPS module. */
@@ -117,10 +141,12 @@ public final class CryptoProviders {
         Resolved r = resolve();
         selfTest(r.provider);
         selfTestCtr(r.ctrProvider);
+        selfTestSealNonce(sealProvider(), r.provider, nonceRandom());
         LOGGER
             .info(
-                "storage encryption uses JCE provider [{}], AES-CTR provider [{}] (FIPS mode: {}, crypto.standard: {})",
+                "storage encryption uses JCE provider [{}], AES-GCM seal provider [{}], AES-CTR provider [{}] (FIPS mode: {}, crypto.standard: {})",
                 r.provider.getName(),
+                sealProvider().getName(),
                 r.ctrProvider.getName(),
                 r.fips,
                 isFipsBuild() ? FIPS_140_3 : "any-supported"
@@ -136,7 +162,8 @@ public final class CryptoProviders {
                     boolean fips = isApprovedOnlyMode();
                     Provider ctrProvider = choose(isFipsBuild(), fips, Security::getProvider);
                     Provider provider = fips ? preferAwsLc(ctrProvider, loadAwsLc()) : ctrProvider;
-                    r = new Resolved(provider, ctrProvider, newSecureRandom(provider, fips), fips);
+                    SecureRandom random = newSecureRandom(provider, fips);
+                    r = new Resolved(provider, ctrProvider, random, fips ? newSecureRandom(ctrProvider, true) : null, fips);
                     resolved = r;
                 }
             }
@@ -294,6 +321,32 @@ public final class CryptoProviders {
             }
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("AES-256-CTR self-test failed for provider [" + provider.getName() + "]", e);
+        }
+    }
+
+    /** Seals with a provider-generated nonce and opens the result with the read provider. */
+    static void selfTestSealNonce(Provider sealProvider, Provider openProvider, SecureRandom random) {
+        try {
+            SecretKeySpec key = new SecretKeySpec(new byte[32], "AES");
+            Cipher seal = Cipher.getInstance("AES/GCM/NoPadding", sealProvider);
+            seal.init(Cipher.ENCRYPT_MODE, key, random);
+            byte[] nonce = seal.getIV();
+            if (nonce == null || nonce.length != 12) {
+                throw new IllegalStateException("provider [" + sealProvider.getName() + "] did not generate a 12-byte GCM nonce");
+            }
+            seal.updateAAD(new byte[8]);
+            byte[] sealed = seal.doFinal(new byte[16]);
+            Cipher open = Cipher.getInstance("AES/GCM/NoPadding", openProvider);
+            open.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, nonce));
+            open.updateAAD(new byte[8]);
+            if (MessageDigest.isEqual(new byte[16], open.doFinal(sealed)) == false) {
+                throw new IllegalStateException("AES-256-GCM nonce round trip failed");
+            }
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException(
+                "AES-256-GCM nonce self-test failed for providers [" + sealProvider.getName() + ", " + openProvider.getName() + "]",
+                e
+            );
         }
     }
 

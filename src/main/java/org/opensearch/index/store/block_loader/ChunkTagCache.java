@@ -16,9 +16,9 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 /**
  * Node-level cache of pages of encrypted files' chunk tag tables.
  *
- * <p>A buffer-pool miss needs each chunk's 16-byte tag as well as its ciphertext. Without this cache
- * every miss does a second Direct I/O read for a few tags. A page holds {@link #TAGS_PER_PAGE} tags
- * (the tags for 2 MiB of data), so neighbouring misses in the same file share one read.
+ * <p>A buffer-pool miss needs each chunk's 28-byte tag-table entry (nonce and tag) as well as its
+ * ciphertext. Without this cache every miss does a second Direct I/O read for a few entries. A page holds
+ * {@link #TAGS_PER_PAGE} entries (those for 2 MiB of data), so neighbouring misses in the same file share one read.
  *
  * <p>Entries are keyed by the file's random message ID and plaintext length, not its path, so a file
  * written again under the same name never sees the old file's tags. Pages of deleted files age out by
