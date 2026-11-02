@@ -10,6 +10,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.util.concurrent.TimeUnit;
 
 import org.opensearch.index.store.metrics.CryptoMetricsService;
@@ -214,7 +215,10 @@ public class FileChannelCache implements Closeable {
     private RefCountedChannel openChannel(String path) {
         try {
             // Uninterruptible where supported, so an interrupted reader cannot close the shared channel
-            return new RefCountedChannel(NativeFileChannel.open(Paths.get(path), directOpenOption != null, directOpenOption));
+            FileChannel fc = directOpenOption != null
+                ? NativeFileChannel.open(Paths.get(path), StandardOpenOption.READ, directOpenOption)
+                : NativeFileChannel.open(Paths.get(path), StandardOpenOption.READ);
+            return new RefCountedChannel(fc);
         } catch (IOException e) {
             throw new RuntimeException("Failed to open FileChannel: " + path, e);
         }

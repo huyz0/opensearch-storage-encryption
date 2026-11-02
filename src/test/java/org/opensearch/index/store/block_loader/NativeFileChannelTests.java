@@ -14,7 +14,9 @@ import java.nio.channels.NonWritableChannelException;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
+import java.nio.file.OpenOption;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -45,7 +47,7 @@ public class NativeFileChannelTests extends OpenSearchTestCase {
     }
 
     private FileChannel open() throws IOException {
-        FileChannel fc = NativeFileChannel.open(file, false, null);
+        FileChannel fc = NativeFileChannel.open(file, StandardOpenOption.READ);
         assertTrue(fc instanceof NativeFileChannel);
         return fc;
     }
@@ -92,7 +94,7 @@ public class NativeFileChannelTests extends OpenSearchTestCase {
     }
 
     public void testMissingFile() {
-        expectThrows(NoSuchFileException.class, () -> NativeFileChannel.open(file.resolveSibling("missing"), false, null));
+        expectThrows(NoSuchFileException.class, () -> NativeFileChannel.open(file.resolveSibling("missing"), StandardOpenOption.READ));
     }
 
     public void testIsReadOnly() throws IOException {
@@ -162,7 +164,7 @@ public class NativeFileChannelTests extends OpenSearchTestCase {
     public void testDirectRead() throws IOException {
         FileChannel fc;
         try {
-            fc = NativeFileChannel.open(file, true, DirectIOReaderUtil.getDirectOpenOption());
+            fc = NativeFileChannel.open(file, StandardOpenOption.READ, DirectIOReaderUtil.getDirectOpenOption());
         } catch (IOException e) {
             assumeNoException("filesystem does not support O_DIRECT", e);
             return;
@@ -178,11 +180,11 @@ public class NativeFileChannelTests extends OpenSearchTestCase {
     public void testAccessDenied() throws IOException {
         Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("---------"));
         assumeFalse("running with root privileges", Files.isReadable(file));
-        expectThrows(AccessDeniedException.class, () -> NativeFileChannel.open(file, false, null));
+        expectThrows(AccessDeniedException.class, () -> NativeFileChannel.open(file, StandardOpenOption.READ));
     }
 
     public void testReadOfDirectoryReportsErrno() throws IOException {
-        try (FileChannel fc = NativeFileChannel.open(file.getParent(), false, null)) {
+        try (FileChannel fc = NativeFileChannel.open(file.getParent(), StandardOpenOption.READ)) {
             IOException e = expectThrows(IOException.class, () -> fc.read(ByteBuffer.allocateDirect(8), 0));
             assertTrue(e.getMessage(), e.getMessage().contains("errno 21")); // EISDIR
         }
@@ -200,7 +202,7 @@ public class NativeFileChannelTests extends OpenSearchTestCase {
         Path big = file.resolveSibling("big");
         int size = 16 << 20;
         Files.write(big, new byte[size]);
-        FileChannel fc = NativeFileChannel.open(big, false, null);
+        FileChannel fc = NativeFileChannel.open(big, StandardOpenOption.READ);
         AtomicReference<Object> result = new AtomicReference<>();
         Thread reader = new Thread(() -> {
             try {
@@ -232,7 +234,7 @@ public class NativeFileChannelTests extends OpenSearchTestCase {
         Path fileA = Files.write(file.resolveSibling("a"), a);
         Path fileB = Files.write(file.resolveSibling("b"), b);
         for (int round = 0; round < 20; round++) {
-            FileChannel fc = NativeFileChannel.open(fileA, false, null);
+            FileChannel fc = NativeFileChannel.open(fileA, StandardOpenOption.READ);
             int readers = 4;
             CountDownLatch started = new CountDownLatch(readers);
             AtomicBoolean stop = new AtomicBoolean();
@@ -269,7 +271,7 @@ public class NativeFileChannelTests extends OpenSearchTestCase {
             // Grab the freed fd number while readers are still running
             List<FileChannel> others = new ArrayList<>();
             for (int i = 0; i < 8; i++) {
-                others.add(NativeFileChannel.open(fileB, false, null));
+                others.add(NativeFileChannel.open(fileB, StandardOpenOption.READ));
             }
             Thread.sleep(2);
             stop.set(true);
@@ -281,5 +283,25 @@ public class NativeFileChannelTests extends OpenSearchTestCase {
             }
             assertNull("round " + round, failure.get());
         }
+    }
+
+    public void testRejectsWriteOptions() {
+        expectThrows(UnsupportedOperationException.class, () -> NativeFileChannel.open(file, StandardOpenOption.WRITE));
+    }
+
+    /**
+     * OpenSearch's runtime agent intercepts methods named {@code open} on FileChannel subtypes and
+     * rejects any call whose arguments are not {@code (Path, OpenOption...)}. Unit tests run without
+     * the agent, so guard the signature here; a different one fails every read on a real node.
+     */
+    public void testOpenMatchesTheRuntimeAgentContract() {
+        int checked = 0;
+        for (java.lang.reflect.Method m : NativeFileChannel.class.getDeclaredMethods()) {
+            if (m.getName().equals("open")) {
+                assertArrayEquals(m.toString(), new Class<?>[] { Path.class, OpenOption[].class }, m.getParameterTypes());
+                checked++;
+            }
+        }
+        assertEquals(1, checked);
     }
 }

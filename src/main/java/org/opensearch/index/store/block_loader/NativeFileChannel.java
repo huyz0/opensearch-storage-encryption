@@ -25,9 +25,13 @@ import java.nio.channels.ReadableByteChannel;
 import java.nio.channels.WritableByteChannel;
 import java.nio.file.AccessDeniedException;
 import java.nio.file.NoSuchFileException;
+import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import org.apache.logging.log4j.LogManager;
@@ -48,8 +52,9 @@ import org.opensearch.common.SuppressForbidden;
  * or aarch64) or if linking the libc functions fails, for example when native access is denied with
  * {@code --illegal-native-access=deny}.
  *
- * <p>{@code open(2)} is called directly, bypassing any file-permission checks the JVM applies to
- * {@link FileChannel#open}. Use this class only for files the plugin already owns, such as shard files.
+ * <p>{@link #open} keeps the {@code (Path, OpenOption...)} shape of {@link FileChannel#open} so that
+ * OpenSearch's runtime agent applies its file-access policy to it (see {@link #open}). Even so, use
+ * this class only for files the plugin already owns, such as shard files.
  */
 @SuppressForbidden(reason = "Uses Panama FFI for uninterruptible positional reads")
 public final class NativeFileChannel extends FileChannel {
@@ -161,17 +166,34 @@ public final class NativeFileChannel extends FileChannel {
     /**
      * Opens {@code path} for reading.
      *
+     * <p>The signature mirrors {@link FileChannel#open(Path, OpenOption...)} on purpose. OpenSearch's
+     * runtime agent intercepts every method named {@code open} on FileChannel subtypes and checks the
+     * caller's file permissions from a {@code (Path, OpenOption...)} argument list; any other argument
+     * types make it reject the call. Keeping this shape means the agent's file-access policy applies
+     * to the native open exactly as it does to {@link FileChannel#open}.
+     *
      * @param path the file to open
-     * @param direct whether to bypass the page cache with O_DIRECT
-     * @param directOpenOption the JDK's O_DIRECT open option, used only for the fallback channel
+     * @param options {@link StandardOpenOption#READ}, optionally with the JDK's O_DIRECT option
+     *        ({@link DirectIOReaderUtil#getDirectOpenOption()})
      * @return an uninterruptible native channel, or a JDK FileChannel where native access is unavailable
      * @throws IOException if the file cannot be opened
      */
-    public static FileChannel open(Path path, boolean direct, java.nio.file.OpenOption directOpenOption) throws IOException {
+    public static FileChannel open(Path path, OpenOption... options) throws IOException {
+        boolean direct = false;
+        for (OpenOption option : options) {
+            if (option == StandardOpenOption.READ) {
+                continue;
+            }
+            if ("DIRECT".equals(option.toString())) {
+                direct = true;
+            } else {
+                throw new UnsupportedOperationException("Unsupported open option: " + option);
+            }
+        }
         if (!AVAILABLE) {
-            return direct
-                ? FileChannel.open(path, StandardOpenOption.READ, directOpenOption)
-                : FileChannel.open(path, StandardOpenOption.READ);
+            Set<OpenOption> jdkOptions = new HashSet<>(Arrays.asList(options));
+            jdkOptions.add(StandardOpenOption.READ);
+            return FileChannel.open(path, jdkOptions);
         }
         String file = path.toString();
         int flags = O_RDONLY | O_CLOEXEC | (direct ? O_DIRECT : 0);
