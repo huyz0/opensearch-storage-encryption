@@ -285,10 +285,9 @@ ssl.TrustManagerFactory.algorithm=PKIX
         systemProperty 'javax.net.ssl.trustStorePassword', 'changeit'
     }
 
-    // Turn the downloaded distribution into a FIPS node: BC-FIPS jars in lib/, FIPS mode on.
+    // Run the test cluster as a FIPS node. The distribution already ships the BC-FIPS jars in lib/ and
+    // config/fips_java.security; it needs the truststore and OPENSEARCH_FIPS_MODE=true.
     testClusters.yamlRestTest {
-        configurations.fipsJars.files.each { extraJarFile it }
-        extraConfigFile 'fips_java.security', file("${fipsDir.get().asFile}/fips_java.security")
         extraConfigFile 'opensearch-fips-truststore.bcfks', file("${fipsDir.get().asFile}/opensearch-fips-truststore.bcfks")
         environment 'OPENSEARCH_FIPS_MODE', 'true'
         keystorePassword 'notarealpasswordphrase'
