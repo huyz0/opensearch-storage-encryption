@@ -231,3 +231,45 @@ jobs:
           name: yaml-rest-test-reports-jdk${{ matrix.jdk }}
           path: |
             ./build/reports/
+
+  fips-tests:
+    name: FIPS 140-3 Tests
+    # Builds with -Pcrypto.standard=FIPS-140-3 and runs every test suite with Bouncy Castle FIPS in
+    # approved-only mode (the YAML REST cluster runs with OPENSEARCH_FIPS_MODE=true).
+    needs: ["Get-CI-Image-Tag", "build"]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-version-linux }}
+      options: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-options }}
+
+    steps:
+      - name: Run start commands
+        run: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-command }}
+
+      # Must be an OpenJDK build: Oracle JDK's JCE provider signature check cannot run with only FIPS providers.
+      - name: Set up JDK for build and test
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Checkout opensearch-storage-encryption
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Switch to ci-runner user and run tests in FIPS mode
+        run: |
+          chown -R ci-runner:ci-runner $GITHUB_WORKSPACE
+          chmod +x $GITHUB_WORKSPACE/gradlew
+          su ci-runner -c "export JAVA_HOME=$JAVA_HOME && export GRADLE_OPTS='$GRADLE_OPTS' && cd $GITHUB_WORKSPACE && ./gradlew test internalClusterTest yamlRestTest -x jcstress -Pcrypto.standard=FIPS-140-3 -Dbuild.snapshot=false"
+
+      - name: Upload test reports
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: fips-test-reports
+          path: |
+            ./build/reports/

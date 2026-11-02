@@ -4,13 +4,10 @@
  */
 package org.opensearch.index.store.benchmark;
 
-import static org.opensearch.index.store.CryptoDirectoryFactory.DEFAULT_CRYPTO_PROVIDER;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Provider;
-import java.security.Security;
 import java.util.Random;
 
 import org.apache.lucene.store.FSDirectory;
@@ -33,6 +30,7 @@ import org.opensearch.index.store.block_loader.CryptoDirectIOBlockLoader;
 import org.opensearch.index.store.bufferpoolfs.BufferPoolDirectory;
 import org.opensearch.index.store.bufferpoolfs.StaticConfigs;
 import org.opensearch.index.store.bufferpoolfs.TestKeyResolver;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.EncryptionMetadataCacheRegistry;
 import org.opensearch.index.store.key.KeyResolver;
@@ -125,7 +123,7 @@ public class ReadBenchmarkBase {
     }
 
     private void setupBufferPoolDirectory() throws Exception {
-        Provider provider = Security.getProvider(DEFAULT_CRYPTO_PROVIDER);
+        Provider provider = CryptoProviders.provider();
         MasterKeyProvider keyProvider = BenchmarkKeyProvider.create();
 
         Settings nodeSettings = Settings

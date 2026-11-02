@@ -12,8 +12,6 @@ import javax.crypto.AEADBadTagException;
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 
-import org.opensearch.index.store.CryptoDirectoryFactory;
-
 /**
  * AES-256-GCM over fixed-size chunks of an encrypted index file.
  *
@@ -66,12 +64,13 @@ public final class ChunkCipher {
     private ChunkCipher() {}
 
     /**
-     * Returns a new AES/GCM cipher. Writers keep their own instance: the JCE refuses to encrypt twice
-     * with the same key and nonce on one instance, which is the check we want for a writer.
+     * Returns a new AES/GCM cipher from {@link CryptoProviders#provider()}. Writers keep their own instance:
+     * SunJCE refuses to encrypt twice with the same key and nonce on one instance, which is the check we want
+     * for a writer. Bouncy Castle FIPS does not make that check.
      */
     public static Cipher newCipher() {
         try {
-            return Cipher.getInstance(TRANSFORMATION, CryptoDirectoryFactory.DEFAULT_CRYPTO_PROVIDER);
+            return Cipher.getInstance(TRANSFORMATION, CryptoProviders.provider());
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("AES/GCM is not available", e);
         }

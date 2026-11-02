@@ -140,6 +140,31 @@ echo "your-secret-key" | bin/opensearch-keystore add -x kms.secret_key
 echo "your-session-token" | bin/opensearch-keystore add -x kms.session_token
 ```
 
+### FIPS 140-3 Mode
+
+On an OpenSearch node running in FIPS mode (`OPENSEARCH_FIPS_MODE=true` on a FIPS distribution, which runs
+Bouncy Castle FIPS in approved-only mode), the plugin does all encryption, authentication and random number
+generation with the `BCFIPS` provider. Otherwise it uses `SunJCE`, which is several times faster. The node log
+says which provider is in use:
+
+```
+storage encryption uses JCE provider [BCFIPS] (FIPS mode: true, crypto.standard: FIPS-140-3)
+```
+
+To get a plugin that only runs in FIPS mode, build it with OpenSearch's own FIPS build parameter:
+
+```bash
+./gradlew assemble -Pcrypto.standard=FIPS-140-3
+```
+
+That plugin refuses to start (when `plugins.crypto.enabled` is true) on a node that is not in approved-only
+mode, instead of silently falling back to a non-validated provider. The same flag runs the unit, internal
+cluster and YAML REST tests in FIPS mode. Run FIPS builds on an OpenJDK build such as Temurin: Oracle JDK
+checks JCE provider signatures with an algorithm the FIPS provider list does not offer.
+
+Not yet covered: key derivation is HKDF built on the provider's HMAC rather than a KDF from the validated
+module, and the `dummy` key provider and any key provider plugin are outside the plugin's control.
+
 ## Usage
 
 ### Creating an Encrypted Index

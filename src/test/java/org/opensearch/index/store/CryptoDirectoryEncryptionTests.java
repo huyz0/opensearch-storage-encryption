@@ -14,7 +14,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Provider;
-import java.security.Security;
 import java.time.Duration;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
@@ -42,6 +41,7 @@ import org.opensearch.index.store.block_cache.CaffeineBlockCache;
 import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.index.store.block_loader.CryptoDirectIOBlockLoader;
 import org.opensearch.index.store.bufferpoolfs.BufferPoolDirectory;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.DefaultKeyResolver;
 import org.opensearch.index.store.key.KeyResolver;
@@ -142,7 +142,7 @@ public class CryptoDirectoryEncryptionTests extends OpenSearchTestCase {
         // Initialize NodeLevelKeyCache with the health monitor
         NodeLevelKeyCache.initialize(nodeSettings, MasterKeyHealthMonitor.getInstance());
 
-        cryptoProvider = Security.getProvider("SunJCE");
+        cryptoProvider = CryptoProviders.provider();
 
         // Initialize EncryptionMetadataCache for each test
         encryptionMetadataCache = new EncryptionMetadataCache();

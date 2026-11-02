@@ -17,7 +17,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.Provider;
-import java.security.Security;
 import java.util.concurrent.ConcurrentMap;
 
 import org.apache.logging.log4j.LogManager;
@@ -28,6 +27,7 @@ import org.opensearch.common.SuppressForbidden;
 import org.opensearch.common.action.ActionFuture;
 import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.key.DefaultKeyResolver;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.key.MasterKeyHealthMonitor;
@@ -96,7 +96,7 @@ public class CryptoTranslogEncryptionTests extends OpenSearchTestCase {
         MasterKeyHealthMonitor.initialize(nodeSettings, mockClient, mockClusterService);
         NodeLevelKeyCache.initialize(nodeSettings, MasterKeyHealthMonitor.getInstance());
 
-        Provider cryptoProvider = Security.getProvider("SunJCE");
+        Provider cryptoProvider = CryptoProviders.provider();
 
         // Create a mock key provider for testing
         keyProvider = new MasterKeyProvider() {

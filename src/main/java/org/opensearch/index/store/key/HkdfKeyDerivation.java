@@ -11,6 +11,8 @@ import java.security.NoSuchAlgorithmException;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
+import org.opensearch.index.store.cipher.CryptoProviders;
+
 /**
  * HKDF (HMAC-based Key Derivation Function) implementation for deriving keys from MessageId.
  * Based on RFC 5869: https://tools.ietf.org/html/rfc5869
@@ -64,7 +66,7 @@ public class HkdfKeyDerivation {
     }
 
     private static byte[] hmac(byte[] key, byte[] data) throws NoSuchAlgorithmException, InvalidKeyException {
-        Mac mac = Mac.getInstance(HMAC_ALGORITHM);
+        Mac mac = Mac.getInstance(HMAC_ALGORITHM, CryptoProviders.provider());
         mac.init(new SecretKeySpec(key, HMAC_ALGORITHM));
         return mac.doFinal(data);
     }
@@ -75,7 +77,7 @@ public class HkdfKeyDerivation {
         byte[] t = new byte[0];
 
         for (int i = 1; i <= n; i++) {
-            Mac mac = Mac.getInstance(HMAC_ALGORITHM);
+            Mac mac = Mac.getInstance(HMAC_ALGORITHM, CryptoProviders.provider());
             mac.init(new SecretKeySpec(prk, HMAC_ALGORITHM));
             mac.update(t);
             mac.update(info);

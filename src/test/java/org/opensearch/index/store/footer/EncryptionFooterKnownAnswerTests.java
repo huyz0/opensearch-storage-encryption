@@ -11,7 +11,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Key;
 import java.security.Provider;
-import java.security.Security;
 import java.util.Arrays;
 import java.util.HexFormat;
 
@@ -21,6 +20,7 @@ import org.apache.lucene.index.CorruptIndexException;
 import org.apache.lucene.store.FSLockFactory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
@@ -134,7 +134,7 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
         Files.copy(getDataPath(GOLDEN_FILE), dir.resolve("_0.fdt"));
         byte[] expected = goldenPlaintext(GOLDEN_PLAINTEXT_LENGTH);
 
-        Provider provider = Security.getProvider("SunJCE");
+        Provider provider = CryptoProviders.provider();
         KeyResolver keyResolver = new FixedKeyResolver();
         EncryptionMetadataCache cache = new EncryptionMetadataCache();
         try (CryptoNIOFSDirectory directory = new CryptoNIOFSDirectory(FSLockFactory.getDefault(), dir, provider, keyResolver, cache)) {

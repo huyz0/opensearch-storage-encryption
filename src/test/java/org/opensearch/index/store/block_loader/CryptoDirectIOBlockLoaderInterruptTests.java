@@ -4,7 +4,6 @@
  */
 package org.opensearch.index.store.block_loader;
 
-import static org.opensearch.index.store.CryptoDirectoryFactory.DEFAULT_CRYPTO_PROVIDER;
 import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_SIZE;
 
 import java.io.IOException;
@@ -12,7 +11,6 @@ import java.lang.foreign.ValueLayout;
 import java.nio.channels.ClosedByInterruptException;
 import java.nio.file.Path;
 import java.security.Provider;
-import java.security.Security;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.lucene.store.FSDirectory;
@@ -30,6 +28,7 @@ import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.CaffeineBlockCache;
 import org.opensearch.index.store.bufferpoolfs.BufferPoolDirectory;
 import org.opensearch.index.store.bufferpoolfs.TestKeyResolver;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.EncryptionMetadataCacheRegistry;
 import org.opensearch.index.store.key.KeyResolver;
@@ -64,7 +63,7 @@ public class CryptoDirectIOBlockLoaderInterruptTests extends OpenSearchTestCase 
         originalWriteCacheEnabled = CryptoDirectoryFactory.isWriteCacheEnabled();
         CryptoDirectoryFactory.setNodeSettings(Settings.builder().put("node.store.crypto.write_cache_enabled", false).build());
         dirPath = createTempDir();
-        Provider provider = Security.getProvider(DEFAULT_CRYPTO_PROVIDER);
+        Provider provider = CryptoProviders.provider();
         MasterKeyProvider keyProvider = DummyKeyProvider.create();
 
         Settings nodeSettings = Settings

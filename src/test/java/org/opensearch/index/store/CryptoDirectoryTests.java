@@ -12,7 +12,6 @@ import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.security.Provider;
-import java.security.Security;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -28,6 +27,7 @@ import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.apache.lucene.tests.mockfile.ExtrasFS;
 import org.opensearch.common.Randomness;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
@@ -61,7 +61,7 @@ public class CryptoDirectoryTests extends OpenSearchBaseDirectoryTestCase {
 
         when(keyResolver.getDataKey()).thenReturn(new SecretKeySpec(rawKey, "AES"));
 
-        Provider provider = Security.getProvider("SunJCE");
+        Provider provider = CryptoProviders.provider();
         assertNotNull("Provider should not be null", provider);
 
         EncryptionMetadataCache cache = new EncryptionMetadataCache();

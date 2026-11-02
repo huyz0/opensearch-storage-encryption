@@ -19,7 +19,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Provider;
-import java.security.Security;
 import java.util.Random;
 import java.util.Set;
 
@@ -34,6 +33,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.opensearch.index.store.bufferpoolfs.BufferPoolDirectory;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.KeyResolver;
 
@@ -60,7 +60,7 @@ public class HybridCryptoDirectoryTests {
         new Random().nextBytes(rawKey);
         when(keyResolver.getDataKey()).thenReturn(new SecretKeySpec(rawKey, "AES"));
 
-        provider = Security.getProvider("SunJCE");
+        provider = CryptoProviders.provider();
         assertNotNull("Provider should not be null", provider);
 
         encryptionMetadataCache = new EncryptionMetadataCache();

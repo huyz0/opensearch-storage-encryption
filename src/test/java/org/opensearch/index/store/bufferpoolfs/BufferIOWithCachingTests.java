@@ -17,8 +17,6 @@ import java.lang.foreign.MemorySegment;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Provider;
-import java.security.SecureRandom;
-import java.security.Security;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.After;
@@ -26,6 +24,7 @@ import org.junit.Before;
 import org.opensearch.index.store.block.RefCountedMemorySegment;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.BlockCacheKey;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.pool.Pool;
 import org.opensearch.test.OpenSearchTestCase;
@@ -59,11 +58,11 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
         mockPool = mock(Pool.class);
         mockCache = mock(BlockCache.class);
         encryptionMetadataCache = new EncryptionMetadataCache();
-        provider = Security.getProvider("SunJCE");
+        provider = CryptoProviders.provider();
 
         // Generate test key (32 bytes for AES-256)
         testKey = new byte[32];
-        new SecureRandom().nextBytes(testKey);
+        random().nextBytes(testKey);
 
         tempFile = Files.createTempFile("test-buffer-io", ".dat");
         arena = Arena.ofAuto();
@@ -134,7 +133,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
         ) {
             // Write data >= BUFFER_SIZE (should bypass buffering)
             byte[] largeData = new byte[BUFFER_SIZE];
-            new SecureRandom().nextBytes(largeData);
+            random().nextBytes(largeData);
             output.writeBytes(largeData, largeData.length);
         }
 
@@ -227,7 +226,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
         ) {
             // Write exactly one cache block (8192 bytes)
             byte[] fullBlock = new byte[CACHE_BLOCK_SIZE];
-            new SecureRandom().nextBytes(fullBlock);
+            random().nextBytes(fullBlock);
             output.writeBytes(fullBlock, fullBlock.length);
         }
 
@@ -259,7 +258,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
             // Write 5 complete cache blocks
             for (int i = 0; i < 5; i++) {
                 byte[] fullBlock = new byte[CACHE_BLOCK_SIZE];
-                new SecureRandom().nextBytes(fullBlock);
+                random().nextBytes(fullBlock);
                 output.writeBytes(fullBlock, fullBlock.length);
             }
         }
@@ -291,7 +290,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
         ) {
             // Write partial block (not aligned to 8KB)
             byte[] partialBlock = new byte[4096];
-            new SecureRandom().nextBytes(partialBlock);
+            random().nextBytes(partialBlock);
             output.writeBytes(partialBlock, partialBlock.length);
         }
 
@@ -322,7 +321,7 @@ public class BufferIOWithCachingTests extends OpenSearchTestCase {
         ) {
             // Write data that results in partial final block
             byte[] data = new byte[CACHE_BLOCK_SIZE + 1234]; // 8192 + 1234 bytes
-            new SecureRandom().nextBytes(data);
+            random().nextBytes(data);
             output.writeBytes(data, data.length);
         }
 

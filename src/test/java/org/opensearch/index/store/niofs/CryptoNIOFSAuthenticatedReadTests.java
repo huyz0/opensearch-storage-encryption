@@ -13,7 +13,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.Key;
-import java.security.Security;
 import java.util.Arrays;
 
 import javax.crypto.spec.SecretKeySpec;
@@ -25,6 +24,7 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.IndexOutput;
 import org.opensearch.index.store.cipher.ChunkCipher;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
@@ -236,7 +236,7 @@ public class CryptoNIOFSAuthenticatedReadTests extends OpenSearchTestCase {
         return new CryptoNIOFSDirectory(
             FSLockFactory.getDefault(),
             dir,
-            Security.getProvider("SunJCE"),
+            CryptoProviders.provider(),
             resolver,
             new EncryptionMetadataCache()
         );

@@ -4,13 +4,11 @@
  */
 package org.opensearch.index.store.bufferpoolfs;
 
-import static org.opensearch.index.store.CryptoDirectoryFactory.DEFAULT_CRYPTO_PROVIDER;
 import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_SIZE;
 
 import java.io.IOException;
 import java.nio.file.Path;
 import java.security.Provider;
-import java.security.Security;
 
 import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.FSLockFactory;
@@ -30,6 +28,7 @@ import org.opensearch.index.store.block_cache.CaffeineBlockCache;
 import org.opensearch.index.store.block_cache.FileBlockCacheKey;
 import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.index.store.block_loader.CryptoDirectIOBlockLoader;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.EncryptionMetadataCacheRegistry;
 import org.opensearch.index.store.key.KeyResolver;
@@ -60,7 +59,7 @@ public class WriteCacheSettingTests extends OpenSearchTestCase {
         originalWriteCacheEnabled = CryptoDirectoryFactory.isWriteCacheEnabled();
 
         dirPath = createTempDir();
-        Provider provider = Security.getProvider(DEFAULT_CRYPTO_PROVIDER);
+        Provider provider = CryptoProviders.provider();
         MasterKeyProvider keyProvider = DummyKeyProvider.create();
 
         Settings nodeSettings = Settings
