@@ -360,6 +360,7 @@ java --enable-preview --enable-native-access=ALL-UNNAMED \
 
 - `HotPathReadBenchmarks` — 16 benchmark methods measuring throughput with data pre-warmed in block cache (BufferPool) or page cache (MMap). Covers all `RandomAccessInput` and `IndexInput` read APIs plus a mixed workload that randomly interleaves all API types.
 - `RadixBlockTableBenchmark` — 7 benchmark methods comparing L1/L2 cache lookup strategies: RadixBlockTable (two plain array loads), CaffeineBlockCache (ConcurrentHashMap), and stamp-gated cache (VarHandle acquire/release). Includes L1+L2 fallback paths and sparse directory growth scenarios.
+- `CipherBenchmarks` — raw AES-GCM seal/open of one chunk and AES-CTR over a translog write, with no I/O. Compares the buffer shapes the read paths use (native, heap, one array) and takes a `provider` parameter, so the same benchmarks can run against SunJCE, Amazon Corretto Crypto Provider or Bouncy Castle FIPS.
 
 ### Filtering Benchmarks
 
@@ -383,6 +384,26 @@ Use `-Pjmh.includes` to run a specific benchmark method (regex match):
 | `numFilesToRead` | `1` | Number of files read per invocation |
 
 > **Note:** The `@Warmup`, `@Measurement`, and `@Fork` annotations in `HotPathReadBenchmarks` take precedence over `-Pjmh.*` command-line flags. To override them, edit the annotation values directly in the source.
+
+### Hardware acceleration
+
+Encryption uses the JDK's own AES-GCM (SunJCE) and AES-CTR. HotSpot compiles both to CPU crypto instructions: AES-NI and PCLMULQDQ on x86_64 (with wider VAES/VPCLMULQDQ paths on CPUs that have them), and the ARMv8 AES and PMULL instructions on aarch64. Nothing needs to be configured. They are on whenever the CPU reports those features, which the AWS and GCP instance types listed below all do, including Graviton and Axion. Without them AES-GCM was about 70 times slower in our measurements, so check the JVM flags (`UseAESIntrinsics`, `UseAESCTRIntrinsics`, `UseGHASHIntrinsics`) if throughput looks wrong. A JVM option that turns them off is the usual culprit.
+
+`scripts/benchmark-cipher.sh` measures all of this on the machine it runs on. It prints the CPU's crypto features and the JVM's intrinsic flags, then runs `CipherBenchmarks` with each provider: SunJCE with intrinsics, SunJCE without them, Amazon Corretto Crypto Provider (AWS-LC; regular and FIPS builds) and Bouncy Castle FIPS. It also runs `openssl speed` as a native ceiling. The provider jars are fetched from Maven Central into `build/bench-providers`. Results and a summary table go to `bench-results/<instance>-<arch>-<time>/`.
+
+```bash
+JAVA_HOME=/path/to/jdk-25 scripts/benchmark-cipher.sh
+RUNS="sunjce accp" scripts/benchmark-cipher.sh     # subset: sunjce sunjce-nohw accp accp-fips bcfips openssl
+```
+
+On a fresh cloud VM, `scripts/cloud-benchmark-bootstrap.sh` installs a JDK 25, clones the repository and runs the script. It works as EC2 user data, a GCE startup script, or over SSH. Instance types worth comparing, at 4 vCPUs each:
+
+| Cloud | x86_64 | aarch64 |
+|-------|--------|---------|
+| AWS | `c7i.xlarge` (Intel Sapphire Rapids, VAES), `c7a.xlarge` (AMD Zen 4, VAES), `c5.xlarge` (Intel Skylake/Cascade Lake, AES-NI only) | `c6g.xlarge` (Graviton2), `c7g.xlarge` (Graviton3), `c8g.xlarge` (Graviton4) |
+| GCP | `c3-standard-4` (Sapphire Rapids), `c3d-standard-4` (AMD Zen 4), `n2-standard-4` (Cascade Lake or Ice Lake) | `c4a-standard-4` (Axion), `t2a-standard-4` (Ampere Altra) |
+
+Use a dedicated (non-burstable) instance and run each one twice; shared hosts vary by 20% or more between runs.
 
 ## Limitations and known issues
 
