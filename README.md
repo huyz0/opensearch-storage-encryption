@@ -143,19 +143,27 @@ echo "your-session-token" | bin/opensearch-keystore add -x kms.session_token
 ### FIPS 140-3 Mode
 
 On an OpenSearch node running in FIPS mode (`OPENSEARCH_FIPS_MODE=true` on a FIPS distribution, which runs
-Bouncy Castle FIPS in approved-only mode), the plugin does all encryption, authentication and random number
-generation with the `BCFIPS` provider. Otherwise it uses `SunJCE`, which is several times faster. The node log
-says which provider is in use:
+Bouncy Castle FIPS in approved-only mode), the plugin uses only FIPS 140-3 validated modules. The FIPS build
+bundles the AWS-LC FIPS module (Amazon Corretto Crypto Provider, FIPS build) and uses it for AES-GCM,
+HMAC, key derivation and random numbers; it is several times faster than Bouncy Castle FIPS and has native
+code for both x86_64 and aarch64. AWS-LC's provider has no AES-CTR, so translog encryption uses `BCFIPS`. If
+AWS-LC fails to load or fails its self-tests, the plugin logs a warning and uses `BCFIPS` for everything.
+Outside FIPS mode the plugin uses the JDK's built-in `SunJCE`. The node log says which providers are in use:
 
 ```
-storage encryption uses JCE provider [BCFIPS] (FIPS mode: true, crypto.standard: FIPS-140-3)
+storage encryption uses JCE provider [AmazonCorrettoCryptoProvider], AES-CTR provider [BCFIPS] (FIPS mode: true, crypto.standard: FIPS-140-3)
 ```
 
 To get a plugin that only runs in FIPS mode, build it with OpenSearch's own FIPS build parameter:
 
 ```bash
-./gradlew assemble -Pcrypto.standard=FIPS-140-3
+./gradlew assemble -Pcrypto.standard=FIPS-140-3                                  # build host's architecture
+./gradlew assemble -Pcrypto.standard=FIPS-140-3 -Paccp.classifier=linux-aarch_64 # Graviton, Axion, ...
 ```
+
+AWS-LC's jar holds a native library for one architecture, so the FIPS build makes one zip per architecture
+(`storage-encryption-<version>-fips-linux-x86_64.zip` or `...-fips-linux-aarch_64.zip`). Install the one that
+matches the node.
 
 That plugin refuses to start (when `plugins.crypto.enabled` is true) on a node that is not in approved-only
 mode, instead of silently falling back to a non-validated provider. The same flag runs the unit, internal
@@ -163,7 +171,7 @@ cluster and YAML REST tests in FIPS mode. Run FIPS builds on an OpenJDK build su
 checks JCE provider signatures with an algorithm the FIPS provider list does not offer.
 
 Per-file keys come from the NIST SP 800-108 counter-mode KDF with HMAC-SHA-384. In FIPS mode it runs inside the
-Bouncy Castle FIPS module. Not covered: the `dummy` key provider (test only) and key provider plugins such as
+validated module (AWS-LC, or Bouncy Castle FIPS as the fallback). Not covered: the `dummy` key provider (test only) and key provider plugins such as
 `crypto-kms` are outside this plugin's control.
 
 ## Usage

@@ -65,8 +65,8 @@ public final class ChunkCipher {
 
     /**
      * Returns a new AES/GCM cipher from {@link CryptoProviders#provider()}. Writers keep their own instance:
-     * SunJCE refuses to encrypt twice with the same key and nonce on one instance, which is the check we want
-     * for a writer. Bouncy Castle FIPS does not make that check.
+     * SunJCE and AWS-LC refuse to encrypt twice with the same key and nonce on one instance, which is the
+     * check we want for a writer. Bouncy Castle FIPS, the FIPS-mode fallback, does not make that check.
      */
     public static Cipher newCipher() {
         try {

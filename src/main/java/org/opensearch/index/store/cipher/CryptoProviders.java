@@ -27,10 +27,10 @@ import org.apache.logging.log4j.Logger;
  * Chooses the JCE provider for every cipher, MAC and random number the plugin uses.
  *
  * <p>On a node running in FIPS 140-3 mode (Bouncy Castle FIPS in approved-only mode, which is what
- * OpenSearch's {@code OPENSEARCH_FIPS_MODE=true} turns on) the plugin uses the validated
- * {@value #FIPS_PROVIDER} provider. OpenSearch removes {@code SunJCE} in that mode, so nothing else
- * would work anyway. Otherwise the plugin uses {@value #DEFAULT_PROVIDER}, whose AES intrinsics are
- * much faster.
+ * OpenSearch's {@code OPENSEARCH_FIPS_MODE=true} turns on) the plugin uses only validated modules: the
+ * AWS-LC FIPS module ({@value #AWS_LC_PROVIDER}, bundled in the FIPS build) when it loads, and
+ * {@value #FIPS_PROVIDER} for AES-CTR, which AWS-LC's provider lacks, and as the fallback. OpenSearch
+ * removes {@code SunJCE} in that mode. Otherwise the plugin uses the JDK's {@value #DEFAULT_PROVIDER}.
  *
  * <p>A plugin built with {@code -Pcrypto.standard=FIPS-140-3} requires FIPS mode: it refuses to pick
  * a provider, and so refuses to start, on a node that is not in approved-only mode. A default build
@@ -58,18 +58,37 @@ public final class CryptoProviders {
 
     private CryptoProviders() {}
 
-    /** The provider and random source chosen for this JVM. */
-    private record Resolved(Provider provider, SecureRandom random, boolean fips) {
+    /** Name of the Amazon Corretto Crypto Provider (AWS-LC), preferred in FIPS mode. */
+    public static final String AWS_LC_PROVIDER = "AmazonCorrettoCryptoProvider";
+
+    private static final String AWS_LC_CLASS = "com.amazon.corretto.crypto.provider.AmazonCorrettoCryptoProvider";
+
+    /** The providers and random source chosen for this JVM. */
+    private record Resolved(Provider provider, Provider ctrProvider, SecureRandom random, boolean fips) {
     }
 
     /**
-     * Returns the provider for all cipher and MAC operations.
+     * Returns the provider for AES-GCM, HMAC and key derivation. In FIPS mode this is the AWS-LC FIPS
+     * module (Amazon Corretto Crypto Provider) when it is bundled and loads, otherwise Bouncy Castle FIPS.
      *
      * @throws IllegalStateException if this is a FIPS build and the node is not in FIPS mode, or the
      *     required provider is not installed
      */
     public static Provider provider() {
         return resolve().provider;
+    }
+
+    /**
+     * Returns the provider for AES-CTR (translog). The AWS-LC provider has no CTR mode, so in FIPS mode
+     * this is always Bouncy Castle FIPS.
+     */
+    public static Provider ctrProvider() {
+        return resolve().ctrProvider;
+    }
+
+    /** Whether {@link #provider()} is the AWS-LC FIPS module. */
+    public static boolean isAwsLc() {
+        return AWS_LC_PROVIDER.equals(provider().getName());
     }
 
     /** Returns a shared random source from the chosen provider, for nonces and message IDs. */
@@ -98,8 +117,9 @@ public final class CryptoProviders {
         selfTest(r.provider);
         LOGGER
             .info(
-                "storage encryption uses JCE provider [{}] (FIPS mode: {}, crypto.standard: {})",
+                "storage encryption uses JCE provider [{}], AES-CTR provider [{}] (FIPS mode: {}, crypto.standard: {})",
                 r.provider.getName(),
+                r.ctrProvider.getName(),
                 r.fips,
                 isFipsBuild() ? FIPS_140_3 : "any-supported"
             );
@@ -112,8 +132,9 @@ public final class CryptoProviders {
                 r = resolved;
                 if (r == null) {
                     boolean fips = isApprovedOnlyMode();
-                    Provider provider = choose(isFipsBuild(), fips, Security::getProvider);
-                    r = new Resolved(provider, newSecureRandom(provider, fips), fips);
+                    Provider ctrProvider = choose(isFipsBuild(), fips, Security::getProvider);
+                    Provider provider = fips ? preferAwsLc(ctrProvider, loadAwsLc()) : ctrProvider;
+                    r = new Resolved(provider, ctrProvider, newSecureRandom(provider, fips), fips);
                     resolved = r;
                 }
             }
@@ -156,13 +177,56 @@ public final class CryptoProviders {
         return provider;
     }
 
+    /**
+     * In FIPS mode, uses the AWS-LC FIPS module when it loaded and passed its self-tests; it is several
+     * times faster than Bouncy Castle FIPS and has native code for x86_64 and aarch64.
+     */
+    static Provider preferAwsLc(Provider bcFips, Provider awsLc) {
+        return awsLc != null ? awsLc : bcFips;
+    }
+
+    /**
+     * Returns the AWS-LC FIPS provider if it is on the classpath, built against the FIPS module, loaded
+     * its native library and passed its power-on self-tests; otherwise null (with a warning if it is
+     * present but unusable). The FIPS build of this plugin bundles it.
+     */
+    static Provider loadAwsLc() {
+        Class<?> type;
+        try {
+            type = Class.forName(AWS_LC_CLASS);
+        } catch (ClassNotFoundException e) {
+            return null;
+        }
+        try {
+            Provider provider = (Provider) type.getField("INSTANCE").get(null);
+            Object loadingError = type.getMethod("getLoadingError").invoke(provider);
+            if (loadingError != null) {
+                LOGGER.warn("AWS-LC provider did not load, using Bouncy Castle FIPS", (Throwable) loadingError);
+                return null;
+            }
+            if (Boolean.TRUE.equals(type.getMethod("isFips").invoke(provider)) == false) {
+                LOGGER.warn("AWS-LC provider on the classpath is not the FIPS build, using Bouncy Castle FIPS");
+                return null;
+            }
+            Object selfTests = type.getMethod("runSelfTests").invoke(provider);
+            if ("PASSED".equals(String.valueOf(selfTests)) == false) {
+                LOGGER.warn("AWS-LC provider self-tests returned [{}], using Bouncy Castle FIPS", selfTests);
+                return null;
+            }
+            return provider;
+        } catch (ReflectiveOperationException | LinkageError | RuntimeException e) {
+            LOGGER.warn("AWS-LC provider is unusable, using Bouncy Castle FIPS", e);
+            return null;
+        }
+    }
+
     private static SecureRandom newSecureRandom(Provider provider, boolean fips) {
         if (fips == false) {
             return new SecureRandom();
         }
         try {
-            // The FIPS provider's default DRBG (SP 800-90A).
-            return SecureRandom.getInstance("DEFAULT", provider);
+            // The FIPS module's SP 800-90A DRBG.
+            return SecureRandom.getInstance(AWS_LC_PROVIDER.equals(provider.getName()) ? "LibCryptoRng" : "DEFAULT", provider);
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("no approved SecureRandom in provider [" + provider.getName() + "]", e);
         }

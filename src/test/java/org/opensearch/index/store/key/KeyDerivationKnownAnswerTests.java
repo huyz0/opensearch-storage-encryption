@@ -72,6 +72,19 @@ public class KeyDerivationKnownAnswerTests extends OpenSearchTestCase {
         }
     }
 
+    public void testAwsLcKdfMatchesHmacConstruction() {
+        assumeTrue("AWS-LC is only bundled in the FIPS build", CryptoProviders.isFipsMode() && CryptoProviders.isAwsLc());
+        for (int i = 0; i < 20; i++) {
+            byte[] key = randomByteArrayOfLength(32);
+            byte[] fixedInput = randomByteArrayOfLength(randomIntBetween(1, 60));
+            int length = randomFrom(16, 24, 32);
+            assertArrayEquals(
+                KeyDerivation.counterModeHmacSha384(key, fixedInput, length),
+                AwsLcKeyDerivation.counterModeHmacSha384(key, fixedInput, length)
+            );
+        }
+    }
+
     static byte[] hex(String s) {
         return HexFormat.of().parseHex(s);
     }
