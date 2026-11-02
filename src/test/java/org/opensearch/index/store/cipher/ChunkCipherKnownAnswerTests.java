@@ -118,12 +118,10 @@ public class ChunkCipherKnownAnswerTests extends OpenSearchTestCase {
         ChunkCipher.seal(ChunkCipher.newCipher(), KEY, 3, randomByteArrayOfLength(length), 0, length, sealed);
         sealed[randomIntBetween(0, sealed.length - 1)] ^= 1;
         for (boolean direct : new boolean[] { false, true }) {
+            ByteBuffer ciphertext = buffer(direct, Arrays.copyOf(sealed, length));
+            ByteBuffer tag = buffer(direct, tagOf(sealed, length));
             ByteBuffer out = direct ? ByteBuffer.allocateDirect(length) : ByteBuffer.allocate(length);
-            expectThrows(
-                AEADBadTagException.class,
-                () -> ChunkCipher
-                    .open(KEY, 3, buffer(direct, Arrays.copyOf(sealed, length)), buffer(direct, tagOf(sealed, length)), out)
-            );
+            expectThrows(AEADBadTagException.class, () -> ChunkCipher.open(KEY, 3, ciphertext, tag, out));
             assertEquals(0, out.position());
             for (int i = 0; i < length; i++) {
                 assertEquals(0, out.get(i));
