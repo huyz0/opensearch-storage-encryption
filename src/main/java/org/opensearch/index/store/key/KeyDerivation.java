@@ -7,6 +7,7 @@ package org.opensearch.index.store.key;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.util.Arrays;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -40,15 +41,15 @@ public final class KeyDerivation {
     private KeyDerivation() {}
 
     /**
-     * Derives {@code keyLength} bytes from the master key, the message ID and a context label.
+     * Derives {@code keyLength} bytes from the master key, the message ID and a label.
      *
      * @param masterKey the master key (32 bytes)
      * @param messageId the unique file identifier (16 bytes)
-     * @param context the label that separates uses of the same master key and message ID
+     * @param label the SP 800-108 Label, which separates uses of the same master key and message ID
      * @param keyLength the desired output length in bytes
      * @return derived key bytes
      */
-    public static byte[] deriveKey(byte[] masterKey, byte[] messageId, String context, int keyLength) {
+    public static byte[] deriveKey(byte[] masterKey, byte[] messageId, String label, int keyLength) {
         if (masterKey == null || masterKey.length != 32) {
             throw new IllegalArgumentException("Master key must be 32 bytes");
         }
@@ -58,7 +59,7 @@ public final class KeyDerivation {
         if (keyLength <= 0 || keyLength > 255 * HASH_LENGTH) {
             throw new IllegalArgumentException("Invalid key length: " + keyLength);
         }
-        byte[] fixedInput = fixedInput(context.getBytes(StandardCharsets.UTF_8), messageId, keyLength);
+        byte[] fixedInput = fixedInput(label.getBytes(StandardCharsets.UTF_8), messageId, keyLength);
         if (CryptoProviders.isFipsMode()) {
             return FipsKeyDerivation.counterModeHmacSha384(masterKey, fixedInput, keyLength);
         }
@@ -66,8 +67,8 @@ public final class KeyDerivation {
     }
 
     /** Derives a 32-byte AES-256 key. */
-    public static byte[] deriveAesKey(byte[] masterKey, byte[] messageId, String context) {
-        return deriveKey(masterKey, messageId, context, 32);
+    public static byte[] deriveAesKey(byte[] masterKey, byte[] messageId, String label) {
+        return deriveKey(masterKey, messageId, label, 32);
     }
 
     /**
@@ -94,11 +95,11 @@ public final class KeyDerivation {
 
     /** SP 800-108 counter mode, counter first, computed with the JCE HMAC of the chosen provider. */
     static byte[] counterModeHmacSha384(byte[] key, byte[] fixedInput, int keyLength) {
+        byte[] block = new byte[HASH_LENGTH];
         try {
             Mac mac = Mac.getInstance(HMAC_ALGORITHM, CryptoProviders.provider());
             mac.init(new SecretKeySpec(key, HMAC_ALGORITHM));
             byte[] out = new byte[keyLength];
-            byte[] block = new byte[HASH_LENGTH];
             for (int i = 1, offset = 0; offset < keyLength; i++, offset += HASH_LENGTH) {
                 mac.update(ByteBuffer.allocate(Integer.BYTES).putInt(i).array());
                 mac.update(fixedInput);
@@ -108,6 +109,9 @@ public final class KeyDerivation {
             return out;
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("key derivation failed", e);
+        } finally {
+            // The last block may hold key bytes beyond keyLength.
+            Arrays.fill(block, (byte) 0);
         }
     }
 }
