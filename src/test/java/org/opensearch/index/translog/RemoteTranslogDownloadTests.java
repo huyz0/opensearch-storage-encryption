@@ -328,7 +328,11 @@ public class RemoteTranslogDownloadTests extends OpenSearchTestCase {
         for (Thread worker : workers) {
             worker.join();
         }
-        assertTrue(failures.toString(), failures.isEmpty());
+        if (failures.isEmpty() == false) {
+            AssertionError error = new AssertionError(failures.size() + " of " + threads + " readers failed", failures.get(0));
+            failures.stream().skip(1).forEach(error::addSuppressed);
+            throw error;
+        }
         assertEquals(headerSize() + CryptoFileChannelWrapper.PREFIX_LENGTH + data.length, Files.size(downloaded));
         assertFalse(Files.exists(downloaded.resolveSibling("translog-4.tlog.encrypting")));
     }

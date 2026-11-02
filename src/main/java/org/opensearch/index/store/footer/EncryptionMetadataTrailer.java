@@ -16,7 +16,7 @@ import java.nio.charset.StandardCharsets;
  *
  * Features:
  * - Data sealed in independent AES-GCM chunks (see ChunkCipher), so every read is authenticated
- * - HKDF key derivation using MessageId
+ * - SP 800-108 key derivation using MessageId
  * - Footer authentication to prevent tampering, including truncation (DataLength is authenticated)
  * - Algorithm agility for future evolution
  * - Variable KeyMetadata for different key providers

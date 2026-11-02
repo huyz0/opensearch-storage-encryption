@@ -21,7 +21,7 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
-import org.opensearch.index.store.key.HkdfKeyDerivation;
+import org.opensearch.index.store.key.KeyDerivation;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.test.OpenSearchTestCase;
 
@@ -180,9 +180,9 @@ public class CryptoFileChannelWrapperTests extends OpenSearchTestCase {
         byte[] raw = Files.readAllBytes(path);
         byte[] nonce = Arrays.copyOfRange(raw, headerSize + 4, headerSize + CryptoFileChannelWrapper.PREFIX_LENGTH);
         Cipher ctr = Cipher.getInstance("AES/CTR/NoPadding");
-        // The CTR key is HKDF(data key, nonce, "translog-ctr"), not the data key itself. The context
+        // The CTR key is KDF(data key, nonce, "translog-ctr"), not the data key itself. The context
         // string is spelled out to pin the on-disk format.
-        SecretKeySpec fileKey = new SecretKeySpec(HkdfKeyDerivation.deriveAesKey(key.getEncoded(), nonce, "translog-ctr"), "AES");
+        SecretKeySpec fileKey = new SecretKeySpec(KeyDerivation.deriveAesKey(key.getEncoded(), nonce, "translog-ctr"), "AES");
         ctr.init(Cipher.DECRYPT_MODE, fileKey, new IvParameterSpec(nonce));
         byte[] plain = ctr.doFinal(raw, headerSize + CryptoFileChannelWrapper.PREFIX_LENGTH, data.length);
         assertArrayEquals("data is one AES-CTR stream starting at the nonce", data, plain);
@@ -366,11 +366,12 @@ public class CryptoFileChannelWrapperTests extends OpenSearchTestCase {
         assertFalse(Files.exists(path));
     }
 
-    public void testVersionOneFilesAreRejected() throws IOException {
+    public void testOlderVersionFilesAreRejected() throws IOException {
         Path path = createTempDir().resolve("translog-10.tlog");
         int headerSize = writeTranslog(path, randomByteArrayOfLength(100));
+        int oldMagic = randomFrom(0x4F535431, 0x4F535432); // "OST1" (raw data key), "OST2" (HKDF)
         try (FileChannel raw = FileChannel.open(path, StandardOpenOption.WRITE)) {
-            raw.write(ByteBuffer.allocate(Integer.BYTES).putInt(0x4F535431).flip(), headerSize); // "OST1"
+            raw.write(ByteBuffer.allocate(Integer.BYTES).putInt(oldMagic).flip(), headerSize);
         }
         try (CryptoFileChannelWrapper channel = open(path, StandardOpenOption.READ)) {
             IOException e = expectThrows(IOException.class, () -> channel.read(ByteBuffer.allocate(16), headerSize));

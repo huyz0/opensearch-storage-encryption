@@ -13,7 +13,7 @@ import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 import org.opensearch.index.store.cipher.CryptoProviders;
-import org.opensearch.index.store.key.HkdfKeyDerivation;
+import org.opensearch.index.store.key.KeyDerivation;
 
 /**
  * Offset-keyed AES-CTR for the data region of one translog file.
@@ -24,7 +24,7 @@ import org.opensearch.index.store.key.HkdfKeyDerivation;
  * decryptable. Each file gets its own random nonce, so no two files share keystream even when
  * they share a key, translog UUID and generation (for example a primary and its replicas).
  *
- * <p>The AES key is derived per file with HKDF from the index data key and the nonce, so the raw
+ * <p>The AES key is derived per file with the SP 800-108 KDF ({@link KeyDerivation}) from the index data key and the nonce, so the raw
  * data key is never used directly as a CTR key.
  *
  * <p>CTR gives confidentiality only. Translog data is not authenticated yet: core's per-operation
@@ -37,7 +37,7 @@ final class TranslogCipher {
     /** Length of the per-file random nonce, in bytes. */
     static final int NONCE_LENGTH = 16;
 
-    /** HKDF context for translog data keys. */
+    /** KDF label for translog data keys. */
     static final String KEY_CONTEXT = "translog-ctr";
 
     private static final int AES_BLOCK = 16;
@@ -58,7 +58,7 @@ final class TranslogCipher {
         if (nonce.length != NONCE_LENGTH) {
             throw new IllegalArgumentException("nonce must be " + NONCE_LENGTH + " bytes");
         }
-        this.key = new SecretKeySpec(HkdfKeyDerivation.deriveAesKey(key.getEncoded(), nonce, KEY_CONTEXT), "AES");
+        this.key = new SecretKeySpec(KeyDerivation.deriveAesKey(key.getEncoded(), nonce, KEY_CONTEXT), "AES");
         this.nonce = nonce.clone();
     }
 

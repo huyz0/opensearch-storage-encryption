@@ -37,8 +37,7 @@ import org.opensearch.index.store.metrics.ErrorType;
  * Always returns the last known key if Master Key Provider is unavailable to ensure operations can continue.
  *
  * Metadata files:
- * - "keyfile" stores the encrypted data key
- * - IVs are derived using HKDF
+ * - "keyfile" stores the encrypted data key; per-file keys are derived from it with {@link KeyDerivation}
  *
  * @opensearch.internal
  */
