@@ -112,6 +112,25 @@ public class ChunkCipherKnownAnswerTests extends OpenSearchTestCase {
         open(1, sealed, 100);
     }
 
+    public void testFailedOpenWritesNothing() throws Exception {
+        int length = randomIntBetween(1, ChunkCipher.CHUNK_SIZE);
+        byte[] sealed = new byte[length + ChunkCipher.TAG_LENGTH];
+        ChunkCipher.seal(ChunkCipher.newCipher(), KEY, 3, randomByteArrayOfLength(length), 0, length, sealed);
+        sealed[randomIntBetween(0, sealed.length - 1)] ^= 1;
+        for (boolean direct : new boolean[] { false, true }) {
+            ByteBuffer out = direct ? ByteBuffer.allocateDirect(length) : ByteBuffer.allocate(length);
+            expectThrows(
+                AEADBadTagException.class,
+                () -> ChunkCipher
+                    .open(KEY, 3, buffer(direct, Arrays.copyOf(sealed, length)), buffer(direct, tagOf(sealed, length)), out)
+            );
+            assertEquals(0, out.position());
+            for (int i = 0; i < length; i++) {
+                assertEquals(0, out.get(i));
+            }
+        }
+    }
+
     public void testChunkMovedToAnotherIndexIsRejected() throws Exception {
         byte[] sealed = new byte[100 + ChunkCipher.TAG_LENGTH];
         ChunkCipher.seal(ChunkCipher.newCipher(), KEY, 1, PLAINTEXT, ChunkCipher.CHUNK_SIZE, 100, sealed);
@@ -153,6 +172,10 @@ public class ChunkCipherKnownAnswerTests extends OpenSearchTestCase {
         expectThrows(
             IllegalArgumentException.class,
             () -> ChunkCipher.open(KEY, 0, ByteBuffer.allocate(10), ByteBuffer.allocate(15), ByteBuffer.allocate(10))
+        );
+        expectThrows(
+            IllegalArgumentException.class,
+            () -> ChunkCipher.open(KEY, 0, ByteBuffer.allocate(10), ByteBuffer.allocate(ChunkCipher.TAG_LENGTH), ByteBuffer.allocate(9))
         );
     }
 

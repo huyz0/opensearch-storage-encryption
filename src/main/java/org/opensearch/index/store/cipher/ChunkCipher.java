@@ -48,7 +48,20 @@ public final class ChunkCipher {
 
     private static final String TRANSFORMATION = "AES/GCM/NoPadding";
 
-    private static final ThreadLocal<Cipher> DECRYPT_CIPHER = ThreadLocal.withInitial(ChunkCipher::newCipher);
+    /**
+     * Per-thread decryption state. {@link #open} copies each chunk into {@code sealed} and decrypts
+     * with one array {@code doFinal}: the JDK's AES-GCM intrinsics work on heap arrays, and calling
+     * the cipher with native (direct) buffers, or with separate update and doFinal calls, takes
+     * slower paths (about half the throughput for the block loader's native buffers). The copies
+     * cost far less than the decryption.
+     */
+    private static final class OpenScratch {
+        final Cipher cipher = newCipher();
+        final byte[] sealed = new byte[CHUNK_SIZE + TAG_LENGTH];
+        final byte[] plaintext = new byte[CHUNK_SIZE];
+    }
+
+    private static final ThreadLocal<OpenScratch> OPEN_SCRATCH = ThreadLocal.withInitial(OpenScratch::new);
 
     private ChunkCipher() {}
 
@@ -115,27 +128,37 @@ public final class ChunkCipher {
     }
 
     /**
-     * Decrypts and authenticates one chunk. If authentication fails the contents of {@code out} are
-     * unspecified and must be discarded.
+     * Decrypts and authenticates one chunk. Nothing is written to {@code out} unless the chunk
+     * authenticates.
      *
      * @param key        the file key
      * @param chunkIndex index of the chunk in the file
      * @param ciphertext the chunk's ciphertext, from position to limit; consumed
      * @param tag        the chunk's tag, from position to limit ({@link #TAG_LENGTH} bytes); consumed
-     * @param out        receives the plaintext at its position
+     * @param out        receives the plaintext at its position, only if authentication succeeds
      * @throws AEADBadTagException if the ciphertext, tag or chunk position was altered
      */
     public static void open(Key key, long chunkIndex, ByteBuffer ciphertext, ByteBuffer tag, ByteBuffer out)
         throws GeneralSecurityException {
-        checkLength(ciphertext.remaining());
+        int length = ciphertext.remaining();
+        checkLength(length);
         if (tag.remaining() != TAG_LENGTH) {
             throw new IllegalArgumentException("tag must be " + TAG_LENGTH + " bytes, got " + tag.remaining());
         }
-        Cipher cipher = DECRYPT_CIPHER.get();
+        if (out.remaining() < length) {
+            throw new IllegalArgumentException("out has " + out.remaining() + " bytes left, chunk needs " + length);
+        }
+        OpenScratch scratch = OPEN_SCRATCH.get();
+        ciphertext.get(scratch.sealed, 0, length);
+        tag.get(scratch.sealed, length, TAG_LENGTH);
+        Cipher cipher = scratch.cipher;
         cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_LENGTH * Byte.SIZE, nonce(chunkIndex)));
-        // GCM decryption buffers until doFinal and only releases plaintext once the tag verifies.
-        cipher.update(ciphertext, out);
-        cipher.doFinal(tag, out);
+        // Keep this a single doFinal over ciphertext||tag. Besides being the fast path, splitting it
+        // into update(ciphertext) + doFinal(tag) makes BC-FIPS 2.1.2's native x86_64 GCM reject
+        // valid chunks for some lengths. Throws AEADBadTagException before anything reaches out.
+        int n = cipher.doFinal(scratch.sealed, 0, length + TAG_LENGTH, scratch.plaintext, 0);
+        assert n == length : n;
+        out.put(scratch.plaintext, 0, length);
     }
 
     private static void checkLength(int length) {
