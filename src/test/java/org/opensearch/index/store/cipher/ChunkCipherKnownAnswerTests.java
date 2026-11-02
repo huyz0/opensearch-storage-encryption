@@ -22,7 +22,7 @@ import org.opensearch.test.OpenSearchTestCase;
  */
 public class ChunkCipherKnownAnswerTests extends OpenSearchTestCase {
 
-    private static final byte[] FILE_KEY = hex("eed4d15a63606f1a006ffad12ad89b6a06afe4198584def8bccd8c3351e146fb");
+    private static final byte[] FILE_KEY = hex("7880842664260e88ad71ee04d9f889fe1d13efe0d86041d1dab05d7a02e8d786");
     private static final SecretKeySpec KEY = new SecretKeySpec(FILE_KEY, "AES");
 
     /** Two chunks: one full chunk and a 100-byte tail. */
@@ -72,13 +72,13 @@ public class ChunkCipherKnownAnswerTests extends OpenSearchTestCase {
         Cipher cipher = ChunkCipher.newCipher();
         byte[] chunk0 = new byte[ChunkCipher.CHUNK_SIZE + ChunkCipher.TAG_LENGTH];
         ChunkCipher.seal(cipher, KEY, 0, PLAINTEXT, 0, ChunkCipher.CHUNK_SIZE, chunk0);
-        assertArrayEquals(hex("08213356f8326c89cbc87df44a1a1236"), Arrays.copyOf(chunk0, 16));
-        assertArrayEquals(hex("473cce9f2b0818086bf67a586a30061f"), tagOf(chunk0, ChunkCipher.CHUNK_SIZE));
+        assertArrayEquals(hex("481a0358a3e5d9f1b6947099bad2946a"), Arrays.copyOf(chunk0, 16));
+        assertArrayEquals(hex("c19c977e0649b1b960f095182d7a7f4f"), tagOf(chunk0, ChunkCipher.CHUNK_SIZE));
 
         byte[] chunk1 = new byte[100 + ChunkCipher.TAG_LENGTH];
         ChunkCipher.seal(cipher, KEY, 1, PLAINTEXT, ChunkCipher.CHUNK_SIZE, 100, chunk1);
-        assertArrayEquals(hex("e4c89a5c2a394939c7846e0a12a733d4"), Arrays.copyOf(chunk1, 16));
-        assertArrayEquals(hex("1201019cde612ca6d0682c9ac2a25e39"), tagOf(chunk1, 100));
+        assertArrayEquals(hex("ade40e4cf072f72037850675a296b534"), Arrays.copyOf(chunk1, 16));
+        assertArrayEquals(hex("b4786c4ce460980adcf68e4edfee26fc"), tagOf(chunk1, 100));
     }
 
     public void testRoundTripHeapAndDirect() throws Exception {

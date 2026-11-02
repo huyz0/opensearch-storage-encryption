@@ -115,7 +115,7 @@ public class CryptoTranslogRecoveryTests extends OpenSearchTestCase {
             assertOps(translog, sources);
         }
 
-        // On disk: every generation with data is in the OST2 format and holds no operation source.
+        // On disk: every generation with data is in the OST3 format and holds no operation source.
         int headerSize = new TranslogHeader(uuid, 1L).sizeInBytes();
         try (Stream<Path> files = Files.list(dir)) {
             for (Path file : files.filter(f -> f.getFileName().toString().endsWith(".tlog")).toList()) {

@@ -18,7 +18,7 @@ import org.apache.lucene.index.CorruptIndexException;
 import org.opensearch.index.store.cipher.ChunkCipher;
 import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
-import org.opensearch.index.store.key.HkdfKeyDerivation;
+import org.opensearch.index.store.key.KeyDerivation;
 
 /**
  * Footer of an encrypted index file.
@@ -356,7 +356,7 @@ public class EncryptionFooter {
 
         // Extract messageId to derive file key for authentication
         byte[] messageId = extractMessageId(footerBytes);
-        byte[] fileKey = HkdfKeyDerivation.deriveFileKey(masterKey, messageId);
+        byte[] fileKey = KeyDerivation.deriveFileKey(masterKey, messageId);
 
         // Deserialize footer with file key for authentication
         EncryptionFooter footer = deserialize(footerBytes, fileKey);

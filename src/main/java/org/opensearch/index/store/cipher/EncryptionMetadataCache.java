@@ -8,7 +8,7 @@ import java.nio.file.Path;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.opensearch.index.store.footer.EncryptionFooter;
-import org.opensearch.index.store.key.HkdfKeyDerivation;
+import org.opensearch.index.store.key.KeyDerivation;
 
 /**
  * Cache for encryption metadata (footers and derived file keys) for a directory.
@@ -27,7 +27,7 @@ public class EncryptionMetadataCache {
 
         FileEncryptionMetadata(EncryptionFooter footer, byte[] masterKey) {
             this.footer = footer;
-            this.fileKey = HkdfKeyDerivation.deriveFileKey(masterKey, footer.getMessageId());
+            this.fileKey = KeyDerivation.deriveFileKey(masterKey, footer.getMessageId());
         }
 
         public EncryptionFooter getFooter() {
@@ -52,7 +52,7 @@ public class EncryptionMetadataCache {
     /**
      * Get or create file encryption metadata atomically.
      * If metadata doesn't exist, creates it from the provided footer and derives the file key.
-     * Only one thread will perform the expensive HKDF derivation per file.
+     * Only one thread will perform the expensive key derivation per file.
      *
      * @param normalizedPath normalized file path
      * @param footer the footer containing messageId for derivation

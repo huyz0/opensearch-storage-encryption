@@ -13,7 +13,7 @@ import java.security.Key;
  * Implementations of this interface are responsible for securely retrieving or generating
  * the key used in symmetric encryption (e.g., AES-GCM).
  *
- * Note: IVs are derived deterministically using HKDF based on file-specific metadata,
+ * Note: IVs are derived deterministically using the SP 800-108 KDF based on file-specific metadata,
  * not stored or retrieved through this interface.
  *
  * @opensearch.internal

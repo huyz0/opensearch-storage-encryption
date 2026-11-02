@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """
 Independent reference implementation of the OSEF v2 on-disk format, used to
-generate the known-answer vectors in HkdfKeyDerivationKnownAnswerTests,
+generate the known-answer vectors in KeyDerivationKnownAnswerTests,
 ChunkCipherKnownAnswerTests and
 EncryptionFooterKnownAnswerTests, and the
 committed golden file golden-v2.osef.
@@ -11,8 +11,8 @@ committed golden file golden-v2.osef.
 v2 layout: [ciphertext][one 16-byte GCM tag per 8 KiB chunk][footer]. Each chunk
 is sealed with AES-256-GCM under the file key, nonce 00000000 || chunk index.
 
-It deliberately shares no code with the plugin: HKDF is written out from
-RFC 5869 with Python's hmac module and AES-GCM comes from the `cryptography`
+It deliberately shares no code with the plugin: the SP 800-108 KDF is written
+out with Python's hmac module and AES-GCM comes from the `cryptography`
 package. If the Java implementation and this script ever disagree, the
 on-disk format has changed and existing encrypted indices may no longer be
 readable.
@@ -35,31 +35,30 @@ MAGIC = b"OSEF"
 GOLDEN_PLAINTEXT_LENGTH = 20000  # two full chunks and a 3616-byte tail
 
 
-def hkdf_sha384(salt, ikm, info, length):
-    # Note the argument order used by HkdfKeyDerivation: the master key is the
-    # HKDF salt and the messageId is the input keying material.
-    prk = hmac.new(salt, ikm, hashlib.sha384).digest()
-    okm, t, i = b"", b"", 1
+def kdf_sha384(key, context, label, length):
+    # NIST SP 800-108r1 counter mode, HMAC-SHA-384 PRF, 32-bit counter first:
+    # K(i) = HMAC(key, [i]_32 || label || 0x00 || context || [L]_32), L in bits.
+    fixed = label + b"\x00" + context + struct.pack(">I", length * 8)
+    okm, i = b"", 1
     while len(okm) < length:
-        t = hmac.new(prk, t + info + bytes([i]), hashlib.sha384).digest()
-        okm += t
+        okm += hmac.new(key, struct.pack(">I", i) + fixed, hashlib.sha384).digest()
         i += 1
     return okm[:length]
 
 
 def file_key(master_key, message_id):
-    return hkdf_sha384(master_key, message_id, b"file-encryption", 32)
+    return kdf_sha384(master_key, message_id, b"file-encryption", 32)
 
 
 def frame_base_iv(master_key, message_id, frame_number):
-    # HKDF with a "frame-N" context. No longer used by the file format; kept as an
-    # extra HKDF vector for HkdfKeyDerivationKnownAnswerTests.
-    return hkdf_sha384(master_key, message_id, b"frame-%d" % frame_number, 16)
+    # KDF with a "frame-N" context. No longer used by the file format; kept as an
+    # extra KDF vector for KeyDerivationKnownAnswerTests.
+    return kdf_sha384(master_key, message_id, b"frame-%d" % frame_number, 16)
 
 
 def translog_base_iv(master_key, translog_uuid):
     padded = translog_uuid.encode("utf-8")[:16].ljust(16, b"\x00")
-    return hkdf_sha384(master_key, padded, b"translog-base-iv", 16)
+    return kdf_sha384(master_key, padded, b"translog-base-iv", 16)
 
 
 CHUNK_SIZE = 1 << 13  # ChunkCipher.CHUNK_SIZE
@@ -106,7 +105,8 @@ def main():
     print("fileKey            ", fk.hex())
     print("frameBaseIV(0)     ", iv0.hex())
     print("frameBaseIV(1)     ", iv1.hex())
-    print("hkdf(49, ctx)      ", hkdf_sha384(MASTER_KEY, MESSAGE_ID, b"known-answer-test", 49).hex())
+    print("kdf(49, ctx)       ", kdf_sha384(MASTER_KEY, MESSAGE_ID, b"known-answer-test", 49).hex())
+    print("translogKey(nonce) ", kdf_sha384(MASTER_KEY, MESSAGE_ID, b"translog-ctr", 32).hex())
     print("translogIV(short)  ", translog_base_iv(MASTER_KEY, "short-uuid").hex())
     print("translogIV(long)   ", translog_base_iv(MASTER_KEY, "8rKGBKWtR9S2bIZ_hXlTQw-trailing").hex())
 

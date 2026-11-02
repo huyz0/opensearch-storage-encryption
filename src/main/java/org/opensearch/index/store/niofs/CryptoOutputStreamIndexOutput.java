@@ -19,7 +19,7 @@ import org.opensearch.index.store.cipher.ChunkCipher;
 import org.opensearch.index.store.cipher.ChunkEncryptor;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
-import org.opensearch.index.store.key.HkdfKeyDerivation;
+import org.opensearch.index.store.key.KeyDerivation;
 import org.opensearch.index.store.key.KeyResolver;
 
 /**
@@ -85,7 +85,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             // Generate MessageId and derive file-specific key
             this.footer = EncryptionFooter.generateNew((short) algorithmId);
             this.masterKey = keyResolver.getDataKey().getEncoded();
-            this.fileKey = HkdfKeyDerivation.deriveFileKey(masterKey, footer.getMessageId());
+            this.fileKey = KeyDerivation.deriveFileKey(masterKey, footer.getMessageId());
             this.encryptor = new ChunkEncryptor(new SecretKeySpec(fileKey, "AES"));
 
             this.normalizedFilePath = EncryptionMetadataCache.normalizePath(filePath);

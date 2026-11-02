@@ -34,7 +34,7 @@ import org.opensearch.index.store.cipher.ChunkEncryptor;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
-import org.opensearch.index.store.key.HkdfKeyDerivation;
+import org.opensearch.index.store.key.KeyDerivation;
 import org.opensearch.index.store.pool.Pool;
 
 /**
@@ -130,7 +130,7 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
             this.footer = EncryptionFooter.generateNew((short) EncryptionMetadataTrailer.ALGORITHM_AES_256_GCM);
 
             // Derive file-specific key
-            this.fileKey = HkdfKeyDerivation.deriveFileKey(masterKey, footer.getMessageId());
+            this.fileKey = KeyDerivation.deriveFileKey(masterKey, footer.getMessageId());
             this.encryptor = new ChunkEncryptor(new SecretKeySpec(fileKey, "AES"));
         }
 

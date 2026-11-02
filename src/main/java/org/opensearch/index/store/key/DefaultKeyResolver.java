@@ -38,7 +38,7 @@ import org.opensearch.index.store.metrics.ErrorType;
  *
  * Metadata files:
  * - "keyfile" stores the encrypted data key
- * - IVs are derived using HKDF
+ * - IVs are derived using the SP 800-108 KDF
  *
  * @opensearch.internal
  */

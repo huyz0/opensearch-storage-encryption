@@ -40,18 +40,18 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
 
     private static final byte[] MASTER_KEY = hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
     private static final byte[] MESSAGE_ID = hex("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf");
-    private static final byte[] FILE_KEY = hex("eed4d15a63606f1a006ffad12ad89b6a06afe4198584def8bccd8c3351e146fb");
+    private static final byte[] FILE_KEY = hex("7880842664260e88ad71ee04d9f889fe1d13efe0d86041d1dab05d7a02e8d786");
     private static final String GOLDEN_FILE = "/org/opensearch/index/store/golden/golden-v2.osef";
     /** Two full 8 KiB chunks and a 3616-byte tail. */
     private static final int GOLDEN_PLAINTEXT_LENGTH = 20000;
-    private static final String GOLDEN_TAG_TABLE_HEX = "473cce9f2b0818086bf67a586a30061f"
-        + "b1f68af5d8293235634b20e7c0fe6e33"
-        + "2f472d32a61d2169cbb07cba8934ee62";
+    private static final String GOLDEN_TAG_TABLE_HEX = "c19c977e0649b1b960f095182d7a7f4f"
+        + "3d85cdaea99e3409dea561be6514e6e0"
+        + "32db71f0d0ce929ea42edbb1e849ffff";
 
     /**
      * Footer of the golden file, no key metadata. Big-endian fields, in order:
      * <pre>
-     * FooterAuthTag      8ef061dddcfe40529873d7cab3d6e95c  GCM tag over the rest of the footer (as AAD)
+     * FooterAuthTag      0b405c3ffde89b56cb4a70aa0e1ff5fa  GCM tag over the rest of the footer (as AAD)
      * DataLength         0000000000004e20                  20000
      * ChunkSize          00002000                          8192
      * MessageId          a0a1a2a3a4a5a6a7a8a9aaabacadaeaf
@@ -62,7 +62,7 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
      * </pre>
      */
     private static final byte[] GOLDEN_FOOTER = hex(
-        "8ef061dddcfe40529873d7cab3d6e95c"
+        "0b405c3ffde89b56cb4a70aa0e1ff5fa"
             + "0000000000004e20"
             + "00002000"
             + "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"

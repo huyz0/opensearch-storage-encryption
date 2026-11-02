@@ -37,7 +37,7 @@ import org.opensearch.index.store.key.KeyResolver;
  * <p>File format:
  * <pre>
  * [TranslogHeader            - plaintext, written and read by core]
- * [magic "OST2"  (4 bytes)   - plaintext]
+ * [magic "OST3"  (4 bytes)   - plaintext]
  * [nonce         (16 bytes)  - plaintext, random per file]
  * [data                      - AES-CTR, see {@link TranslogCipher}]
  * </pre>
@@ -56,10 +56,11 @@ import org.opensearch.index.store.key.KeyResolver;
 public class CryptoFileChannelWrapper extends FileChannel {
 
     /**
-     * "OST2": OpenSearch translog, encryption format version 2 (per-file key derived with HKDF).
-     * Version 1 used the data key directly and is rejected as unsupported.
+     * "OST3": OpenSearch translog, encryption format version 3 (per-file key derived with the
+     * SP 800-108 KDF). Version 1 used the data key directly and version 2 derived it with HKDF; both
+     * are rejected as unsupported.
      */
-    static final int MAGIC = 0x4F535432;
+    static final int MAGIC = 0x4F535433;
 
     /** Bytes between the core header and the encrypted data: magic plus nonce. */
     static final int PREFIX_LENGTH = Integer.BYTES + TranslogCipher.NONCE_LENGTH;
