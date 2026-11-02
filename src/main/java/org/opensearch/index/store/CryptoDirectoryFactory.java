@@ -9,7 +9,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.Provider;
-import java.security.Security;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.function.Function;
@@ -40,6 +39,7 @@ import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.index.store.block_loader.CryptoDirectIOBlockLoader;
 import org.opensearch.index.store.block_loader.FileChannelCache;
 import org.opensearch.index.store.bufferpoolfs.BufferPoolDirectory;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.EncryptionMetadataCacheRegistry;
 import org.opensearch.index.store.hybrid.HybridCryptoDirectory;
@@ -137,11 +137,6 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
      * Base setting prefix for crypto-related index settings.
      */
     public static final String CRYPTO_SETTING = "index.store.crypto";
-
-    /**
-     * Default crypto provider name.
-     */
-    public static final String DEFAULT_CRYPTO_PROVIDER = "SunJCE";
 
     /**
      * Specifies the Key management plugin type to be used. The desired CryptoKeyProviderPlugin
@@ -430,7 +425,7 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
         // Extract shardId from path structure: .../indices/{index-uuid}/{shard-id}/index/
         // location.getParent() gives us the shard directory
         int shardId = Integer.parseInt(location.getParent().getFileName().toString());
-        final Provider provider = Security.getProvider(DEFAULT_CRYPTO_PROVIDER);
+        final Provider provider = CryptoProviders.provider();
 
         // Use index-level key resolver - store keys at index level
 

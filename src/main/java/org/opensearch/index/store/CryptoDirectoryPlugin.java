@@ -36,6 +36,7 @@ import org.opensearch.index.store.action.GetIndexCountForKeyAction;
 import org.opensearch.index.store.action.TransportGetIndexCountForKeyAction;
 import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_loader.FileChannelCache;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.key.MasterKeyHealthMonitor;
 import org.opensearch.index.store.key.NodeLevelKeyCache;
 import org.opensearch.index.store.key.ShardKeyResolverRegistry;
@@ -96,6 +97,8 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         this.allowDummyKeyProvider = CryptoDirectoryFactory.NODE_ALLOW_DUMMY_KEY_PROVIDER_SETTING.get(settings);
 
         if (enabled) {
+            // Fail node startup, not the first encrypted write, if the JCE provider is missing or not FIPS when required.
+            CryptoProviders.checkAtStartup();
             log.info("OpenSearch Crypto Directory Plugin is enabled and ready for encryption operations");
         } else {
             log

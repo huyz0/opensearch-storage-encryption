@@ -17,7 +17,6 @@ import static org.mockito.Mockito.when;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Provider;
-import java.security.Security;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -38,6 +37,7 @@ import org.opensearch.common.action.ActionFuture;
 import org.opensearch.common.crypto.DataKeyPair;
 import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.common.settings.Settings;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.telemetry.metrics.MetricsRegistry;
 import org.opensearch.test.OpenSearchTestCase;
@@ -77,7 +77,7 @@ public class ShardKeyResolverRegistryConcurrencyTests extends OpenSearchTestCase
         when(mockKeyProvider.decryptKey(any())).thenReturn(plaintextKey);
 
         // Get crypto provider
-        cryptoProvider = Security.getProvider("SunJCE");
+        cryptoProvider = CryptoProviders.provider();
 
         // Initialize CryptoMetricsService
         CryptoMetricsService.initialize(mock(MetricsRegistry.class));

@@ -12,6 +12,7 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
 
 /**
@@ -44,7 +45,7 @@ final class TranslogCipher {
 
     private static final ThreadLocal<Cipher> CTR = ThreadLocal.withInitial(() -> {
         try {
-            return Cipher.getInstance("AES/CTR/NoPadding");
+            return Cipher.getInstance("AES/CTR/NoPadding", CryptoProviders.provider());
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("AES/CTR/NoPadding is not available", e);
         }

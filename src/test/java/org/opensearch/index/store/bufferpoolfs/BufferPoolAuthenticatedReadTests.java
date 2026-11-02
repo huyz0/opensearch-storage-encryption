@@ -4,8 +4,6 @@
  */
 package org.opensearch.index.store.bufferpoolfs;
 
-import static org.opensearch.index.store.CryptoDirectoryFactory.DEFAULT_CRYPTO_PROVIDER;
-
 import java.io.IOException;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
@@ -14,7 +12,6 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.Provider;
-import java.security.Security;
 import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.CyclicBarrier;
@@ -39,6 +36,7 @@ import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.index.store.block_loader.ChunkTagCache;
 import org.opensearch.index.store.block_loader.CryptoDirectIOBlockLoader;
 import org.opensearch.index.store.cipher.ChunkCipher;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.EncryptionMetadataCacheRegistry;
 import org.opensearch.index.store.key.KeyResolver;
@@ -76,7 +74,7 @@ public class BufferPoolAuthenticatedReadTests extends OpenSearchTestCase {
         CryptoDirectoryFactory.setNodeSettings(Settings.builder().put("node.store.crypto.write_cache_enabled", false).build());
 
         path = createTempDir();
-        provider = Security.getProvider(DEFAULT_CRYPTO_PROVIDER);
+        provider = CryptoProviders.provider();
         MasterKeyProvider keyProvider = DummyKeyProvider.create();
 
         Settings nodeSettings = Settings

@@ -19,7 +19,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.Key;
 import java.security.Provider;
-import java.security.Security;
 import java.util.Arrays;
 import java.util.concurrent.ConcurrentMap;
 
@@ -40,6 +39,7 @@ import org.opensearch.common.crypto.DataKeyPair;
 import org.opensearch.common.crypto.MasterKeyProvider;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.index.store.CaffeineThreadLeakFilter;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.telemetry.metrics.MetricsRegistry;
 import org.opensearch.test.OpenSearchTestCase;
@@ -71,8 +71,8 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
 
         tempDir = createTempDir();
         directory = new NIOFSDirectory(tempDir, FSLockFactory.getDefault());
-        provider = Security.getProvider("SunJCE");
-        assertNotNull("SunJCE provider should be available", provider);
+        provider = CryptoProviders.provider();
+        assertNotNull("JCE provider should be available", provider);
 
         // Initialize CryptoMetricsService
         CryptoMetricsService.initialize(mock(MetricsRegistry.class));

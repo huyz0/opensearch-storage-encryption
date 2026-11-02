@@ -6,12 +6,10 @@ package org.opensearch.index.store.bufferpoolfs;
 
 import static org.opensearch.discovery.DiscoveryModule.DISCOVERY_SEED_PROVIDERS_SETTING;
 import static org.opensearch.discovery.SettingsBasedSeedHostsProvider.DISCOVERY_SEED_HOSTS_SETTING;
-import static org.opensearch.index.store.CryptoDirectoryFactory.DEFAULT_CRYPTO_PROVIDER;
 
 import java.io.IOException;
 import java.nio.file.Path;
 import java.security.Provider;
-import java.security.Security;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.lucene.store.FSDirectory;
@@ -34,6 +32,7 @@ import org.opensearch.index.store.block_cache.BlockCache;
 import org.opensearch.index.store.block_cache.CaffeineBlockCache;
 import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.index.store.block_loader.CryptoDirectIOBlockLoader;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.EncryptionMetadataCacheRegistry;
 import org.opensearch.index.store.key.KeyResolver;
@@ -101,7 +100,7 @@ public class CachedMemorySegmentIndexInputFromDirectoryTests extends BaseIndexIn
         // Simulate FS block size (4 KB) smaller than cache block size (8 KB)
         PanamaNativeAccess.setFileSystemBlockSizeOverride(4096);
         Path path = createTempDir();
-        Provider provider = Security.getProvider(DEFAULT_CRYPTO_PROVIDER);
+        Provider provider = CryptoProviders.provider();
         MasterKeyProvider keyProvider = DummyKeyProvider.create();
         this.poolResources = PoolBuilder.build(createNodeSettings());
         Pool<RefCountedMemorySegment> segmentPool = poolResources.getSegmentPool();

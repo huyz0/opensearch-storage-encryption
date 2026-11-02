@@ -18,7 +18,6 @@ import java.nio.file.OpenOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
-import java.security.SecureRandom;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,6 +28,7 @@ import java.util.zip.CRC32;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.util.IOUtils;
 import org.opensearch.common.SuppressForbidden;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.key.KeyResolver;
 
 /**
@@ -64,7 +64,6 @@ public class CryptoFileChannelWrapper extends FileChannel {
     /** Bytes between the core header and the encrypted data: magic plus nonce. */
     static final int PREFIX_LENGTH = Integer.BYTES + TranslogCipher.NONCE_LENGTH;
 
-    private static final SecureRandom RANDOM = new SecureRandom();
     private static final int TRANSFER_BUFFER_SIZE = 8192;
 
     private final FileChannel delegate;
@@ -508,7 +507,7 @@ public class CryptoFileChannelWrapper extends FileChannel {
         synchronized (cipherLock) {
             if (cipher == null) {
                 byte[] nonce = new byte[TranslogCipher.NONCE_LENGTH];
-                RANDOM.nextBytes(nonce);
+                CryptoProviders.secureRandom().nextBytes(nonce);
                 // Resolve the key first so a key failure leaves no prefix behind.
                 TranslogCipher fresh = newCipher(nonce);
                 ByteBuffer prefix = ByteBuffer.allocate(PREFIX_LENGTH);

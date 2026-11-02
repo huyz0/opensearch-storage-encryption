@@ -10,6 +10,7 @@ import java.util.HexFormat;
 import javax.crypto.KDF;
 import javax.crypto.spec.HKDFParameterSpec;
 
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.test.OpenSearchTestCase;
 
 /**
@@ -50,6 +51,8 @@ public class HkdfKeyDerivationKnownAnswerTests extends OpenSearchTestCase {
      * messageId as input keying material, for random inputs.
      */
     public void testMatchesJdkHkdf() throws Exception {
+        // The JDK KDF API is a SunJCE service; OpenSearch removes SunJCE in FIPS mode.
+        assumeFalse("SunJCE is not available in FIPS mode", CryptoProviders.isFipsMode());
         KDF kdf = KDF.getInstance("HKDF-SHA384");
         for (int i = 0; i < 20; i++) {
             byte[] masterKey = randomByteArrayOfLength(32);

@@ -15,7 +15,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.Provider;
-import java.security.Security;
 
 import javax.crypto.spec.SecretKeySpec;
 
@@ -38,6 +37,7 @@ import org.opensearch.cluster.metadata.IndexMetadata;
 import org.opensearch.common.Randomness;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.index.IndexSettings;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
@@ -382,7 +382,7 @@ public class CryptoDirectoryResizeTests extends LuceneTestCase {
         KeyResolver keyResolver = mock(KeyResolver.class);
         when(keyResolver.getDataKey()).thenReturn(new SecretKeySpec(rawKey, "AES"));
 
-        Provider provider = Security.getProvider("SunJCE");
+        Provider provider = CryptoProviders.provider();
 
         // Create keyfile in source directory (as DefaultKeyResolver would do)
         // In real scenario, this is done by CryptoDirectoryFactory -> ShardKeyResolverRegistry -> DefaultKeyResolver

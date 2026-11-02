@@ -6,7 +6,6 @@ package org.opensearch.index.store.footer;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.security.SecureRandom;
 import java.util.Arrays;
 
 import javax.crypto.Cipher;
@@ -17,6 +16,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.lucene.index.CorruptIndexException;
 import org.opensearch.index.store.cipher.ChunkCipher;
+import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.HkdfKeyDerivation;
 
@@ -66,7 +66,7 @@ public class EncryptionFooter {
 
     public static EncryptionFooter generateNew(short algorithmId) {
         byte[] messageId = new byte[EncryptionMetadataTrailer.MESSAGE_ID_SIZE];
-        new SecureRandom().nextBytes(messageId);
+        CryptoProviders.secureRandom().nextBytes(messageId);
         return new EncryptionFooter(messageId, algorithmId);
     }
 
@@ -251,8 +251,7 @@ public class EncryptionFooter {
             byte[] footerIV = new byte[12];  // GCM uses 12-byte IV
             Arrays.fill(footerIV, 0, 8, (byte) 0xFF);  // 0xFFFFFFFFFFFFFFFF0000
 
-            // Use default provider instead of null
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding", CryptoProviders.provider());
             GCMParameterSpec spec = new GCMParameterSpec(128, footerIV);
             cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(fileKey, "AES"), spec);
 

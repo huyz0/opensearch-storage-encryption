@@ -217,6 +217,89 @@ tasks.named('test').configure {
     finalizedBy tasks.named('jcstress')
 }
 
+// ---- FIPS 140-3 build ----
+// ./gradlew build -Pcrypto.standard=FIPS-140-3 (OpenSearch's own build parameter) produces a plugin that
+// refuses to start unless the node runs Bouncy Castle FIPS in approved-only mode (OPENSEARCH_FIPS_MODE=true),
+// and runs the unit, internal cluster and YAML REST tests in that mode. The default build works in both modes.
+def cryptoStandard = (project.findProperty('crypto.standard') ?: 'any-supported').toString()
+def fipsBuild = cryptoStandard == 'FIPS-140-3'
+
+def generatedBuildInfo = layout.buildDirectory.dir('crypto-standard-resources')
+def generateCryptoStandard = tasks.register('generateCryptoStandard') {
+    inputs.property('cryptoStandard', cryptoStandard)
+    outputs.dir(generatedBuildInfo)
+    doLast {
+        def f = generatedBuildInfo.get().file('org/opensearch/index/store/cipher/crypto-standard.properties').asFile
+        f.parentFile.mkdirs()
+        f.text = "crypto.standard=${cryptoStandard}\n"
+    }
+}
+sourceSets.main.resources.srcDir(files(generatedBuildInfo).builtBy(generateCryptoStandard))
+
+if (fipsBuild) {
+    configurations {
+        fipsJars { canBeConsumed = false; canBeResolved = true; transitive = false }
+        testRuntimeOnly.extendsFrom fipsJars
+        internalClusterTestRuntimeOnly.extendsFrom fipsJars
+    }
+    dependencies {
+        // Same modules and versions as an OpenSearch FIPS distribution's lib/ directory.
+        fipsJars "org.bouncycastle:bc-fips:${versions.bouncycastle_jce}"
+        fipsJars "org.bouncycastle:bctls-fips:${versions.bouncycastle_tls}"
+        fipsJars "org.bouncycastle:bcutil-fips:${versions.bouncycastle_util}"
+    }
+
+    // The security file OpenSearch uses in FIPS mode, and the BCFKS truststore its build tools ship.
+    def fipsDir = layout.buildDirectory.dir('fips')
+    def prepareFipsTestConfig = tasks.register('prepareFipsTestConfig') {
+        def buildToolsJar = buildscript.configurations.classpath.find { it.name.startsWith('build-tools-') }
+        inputs.file(buildToolsJar)
+        outputs.dir(fipsDir)
+        doLast {
+            def dir = fipsDir.get().asFile
+            dir.mkdirs()
+            new File(dir, 'fips_java.security').text = """\
+security.provider.1=org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider C:HYBRID;ENABLE{All};
+security.provider.2=org.bouncycastle.jsse.provider.BouncyCastleJsseProvider fips:BCFIPS
+security.provider.3=SUN
+security.provider.4=SunJGSS
+ssl.KeyManagerFactory.algorithm=PKIX
+ssl.TrustManagerFactory.algorithm=PKIX
+"""
+            copy {
+                from zipTree(buildToolsJar)
+                include 'opensearch-fips-truststore.bcfks'
+                into dir
+            }
+        }
+    }
+
+    tasks.withType(Test).matching { it.name in ['test', 'internalClusterTest'] }.configureEach {
+        dependsOn prepareFipsTestConfig
+        def dir = fipsDir.get().asFile
+        systemProperty 'org.bouncycastle.fips.approved_only', 'true'
+        systemProperty 'java.security.properties', "${dir}/fips_java.security"
+        systemProperty 'javax.net.ssl.trustStore', "${dir}/opensearch-fips-truststore.bcfks"
+        systemProperty 'javax.net.ssl.trustStoreType', 'BCFKS'
+        systemProperty 'javax.net.ssl.trustStoreProvider', 'BCFIPS'
+        systemProperty 'javax.net.ssl.trustStorePassword', 'changeit'
+    }
+
+    // Turn the downloaded distribution into a FIPS node: BC-FIPS jars in lib/, FIPS mode on.
+    testClusters.yamlRestTest {
+        configurations.fipsJars.files.each { extraJarFile it }
+        extraConfigFile 'fips_java.security', file("${fipsDir.get().asFile}/fips_java.security")
+        extraConfigFile 'opensearch-fips-truststore.bcfks', file("${fipsDir.get().asFile}/opensearch-fips-truststore.bcfks")
+        environment 'OPENSEARCH_FIPS_MODE', 'true'
+        keystorePassword 'notarealpasswordphrase'
+        systemProperty 'javax.net.ssl.trustStore', '${OPENSEARCH_PATH_CONF}/opensearch-fips-truststore.bcfks'
+        systemProperty 'javax.net.ssl.trustStoreType', 'BCFKS'
+        systemProperty 'javax.net.ssl.trustStoreProvider', 'BCFIPS'
+        systemProperty 'javax.net.ssl.trustStorePassword', 'changeit'
+    }
+    tasks.named('yamlRestTest').configure { dependsOn prepareFipsTestConfig }
+}
+
 task allTests {
     dependsOn test, internalClusterTest, yamlRestTest
     group = 'Verification'
