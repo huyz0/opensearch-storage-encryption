@@ -338,6 +338,10 @@ public class RadixBlockTableConcurrencyTests extends OpenSearchTestCase {
                                 }
                             }
                             iter++;
+                            // Virtual threads are not preempted: without yielding, readers can hold every
+                            // carrier thread and the clearer never runs (seen on 4-CPU CI runners).
+                            if ((iter & 0xFF) == 0)
+                                Thread.yield();
                         } catch (Exception e) {
                             exceptionThrown.set(true);
                             running.set(false);
