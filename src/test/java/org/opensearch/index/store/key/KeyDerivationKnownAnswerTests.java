@@ -5,6 +5,7 @@
 package org.opensearch.index.store.key;
 
 import java.util.HexFormat;
+import java.util.Locale;
 
 import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.test.OpenSearchTestCase;
@@ -69,6 +70,23 @@ public class KeyDerivationKnownAnswerTests extends OpenSearchTestCase {
                 KeyDerivation.counterModeHmacSha384(key, fixedInput, length),
                 FipsKeyDerivation.counterModeHmacSha384(key, fixedInput, length)
             );
+        }
+    }
+
+    /** ACCP 2.5.0 looks KDF names up with the default locale; a locale change after it registered them must not break writes. */
+    public void testAwsLcKdfSurvivesDefaultLocaleChange() {
+        assumeTrue("AWS-LC is only bundled in the FIPS build", CryptoProviders.isFipsMode() && CryptoProviders.isAwsLc());
+        byte[] key = randomByteArrayOfLength(32);
+        byte[] fixedInput = randomByteArrayOfLength(20);
+        byte[] expected = KeyDerivation.counterModeHmacSha384(key, fixedInput, 32);
+        Locale saved = Locale.getDefault();
+        try {
+            for (String tag : new String[] { "tr-TR", "az-Cyrl", "en-US" }) {
+                Locale.setDefault(Locale.forLanguageTag(tag));
+                assertArrayEquals(tag, expected, AwsLcKeyDerivation.counterModeHmacSha384(key, fixedInput, 32));
+            }
+        } finally {
+            Locale.setDefault(saved);
         }
     }
 
