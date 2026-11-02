@@ -89,7 +89,7 @@ Translog files keep core's header in plaintext, followed by a 4-byte magic, a ra
 Efficient memory management is achieved through `MemorySegmentPool`, which provides pooling of off-heap memory segments. `RefCountedMemorySegment` ensures safe concurrent access through reference counting. The system supports configurable pool sizes and warmup strategies to optimize resource utilization.
 
 #### I/O Optimization
-`ReadaheadManager` prefetches blocks for sequential reads. `CryptoDirectIOBlockLoader` loads and decrypts blocks on a cache miss, and `DirectIOReaderUtil` opens files with O_DIRECT so reads bypass the OS page cache. Because of that, data that is not in the block cache is read from disk, not from the page cache.
+`ReadaheadManager` prefetches blocks for sequential reads. `CryptoDirectIOBlockLoader` loads and decrypts blocks on a cache miss, taking chunk tags from a node-wide cache of tag-table pages (`ChunkTagCache`, bounded to about 32 MiB of heap including per-entry overhead), so a miss whose tag page is cached needs one data read instead of two, and `DirectIOReaderUtil` opens files with O_DIRECT so reads bypass the OS page cache. Because of that, data that is not in the block cache is read from disk, not from the page cache.
 
 ## Requirements
 

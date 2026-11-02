@@ -12,6 +12,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedByInterruptException;
 import java.nio.channels.ClosedChannelException;
@@ -53,6 +54,7 @@ import org.opensearch.index.store.pool.Pool;
  * <li>Memory pool integration for efficient buffer management</li>
  * <li>Block-aligned operations for optimal storage performance</li>
  * <li>Cached FileChannels via {@link FileChannelCache} to avoid per-load open/close overhead</li>
+ * <li>Cached tag-table pages via {@link ChunkTagCache}, so most misses need one read, not two</li>
  * </ul>
  *
  * @opensearch.internal
@@ -66,12 +68,13 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
     private final Pool<RefCountedMemorySegment> segmentPool;
     private final EncryptionMetadataCache encryptionMetadataCache;
     private final FileChannelCache fileChannelCache;
+    private final ChunkTagCache tagCache;
 
     /**
-     * Constructs a new CryptoDirectIOBlockLoader with the specified memory pool and key resolver.
+     * Constructs a new CryptoDirectIOBlockLoader with its own {@link ChunkTagCache}.
      *
      * @param segmentPool the memory segment pool for acquiring buffer space
-     * @param keyResolver the resolver for obtaining encryption keys and initialization vectors
+     * @param keyResolver the resolver for obtaining encryption keys
      * @param encryptionMetadataCache cache for encryption metadata
      * @param fileChannelCache node-level cache of FileChannels bounded by max open FDs
      */
@@ -81,10 +84,30 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         EncryptionMetadataCache encryptionMetadataCache,
         FileChannelCache fileChannelCache
     ) {
+        this(segmentPool, keyResolver, encryptionMetadataCache, fileChannelCache, new ChunkTagCache(ChunkTagCache.DEFAULT_MAX_BYTES));
+    }
+
+    /**
+     * Constructs a new CryptoDirectIOBlockLoader.
+     *
+     * @param segmentPool the memory segment pool for acquiring buffer space
+     * @param keyResolver the resolver for obtaining encryption keys
+     * @param encryptionMetadataCache cache for encryption metadata
+     * @param fileChannelCache node-level cache of FileChannels bounded by max open FDs
+     * @param tagCache node-level cache of chunk tag pages
+     */
+    public CryptoDirectIOBlockLoader(
+        Pool<RefCountedMemorySegment> segmentPool,
+        KeyResolver keyResolver,
+        EncryptionMetadataCache encryptionMetadataCache,
+        FileChannelCache fileChannelCache,
+        ChunkTagCache tagCache
+    ) {
         this.segmentPool = segmentPool;
         this.keyResolver = keyResolver;
         this.encryptionMetadataCache = encryptionMetadataCache;
         this.fileChannelCache = fileChannelCache;
+        this.tagCache = tagCache;
     }
 
     @Override
@@ -109,6 +132,8 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         acquireSegments(result, poolTimeoutMs);
         boolean success = false;
         long chunk = -1;
+        long dataLength = -1;
+        byte[] messageId = null;
 
         try (Arena arena = Arena.ofConfined()) {
             byte[] masterKey = keyResolver.getDataKey().getEncoded();
@@ -116,10 +141,11 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             // Get footer from disk and load metadata (footer + derived key) atomically into cache
             EncryptionFooter footer = readFooterFromDisk(normalizedPath, filePath, masterKey);
             var metadata = encryptionMetadataCache.getOrLoadMetadata(normalizedPath, footer, masterKey);
-            long dataLength = metadata.getFooter().getDataLength();
+            dataLength = metadata.getFooter().getDataLength();
             SecretKeySpec fileKey = new SecretKeySpec(metadata.getFileKey(), "AES");
+            messageId = metadata.getFooter().getMessageId();
 
-            // The footer may come from the cache, so check the size here too: truncation is corruption.
+            // The footer and tags may come from caches, so check the size on every load: truncation is corruption.
             long expectedSize = dataLength + metadata.getFooter().getTrailerLength();
             long actualSize = Files.size(filePath);
             if (actualSize != expectedSize) {
@@ -137,13 +163,21 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             long firstChunk = startOffset >>> ChunkCipher.CHUNK_SIZE_POWER;
             int chunks = (int) Math.min(blockCount, ChunkCipher.chunkCount(dataLength) - firstChunk);
             long readLength = Math.min((long) chunks << CACHE_BLOCK_SIZE_POWER, dataLength - startOffset);
-            long tagsLength = (long) chunks * ChunkCipher.TAG_LENGTH;
 
             MemorySegment ciphertext = readAligned(normalizedPath, filePath, startOffset, readLength, arena);
-            MemorySegment tags = readAligned(normalizedPath, filePath, dataLength + firstChunk * ChunkCipher.TAG_LENGTH, tagsLength, arena);
-            if (ciphertext.byteSize() != readLength || tags.byteSize() != tagsLength) {
+            if (ciphertext.byteSize() != readLength) {
                 throw new EOFException("Unexpected EOF reading " + chunks + " chunks at offset " + startOffset + " of " + filePath);
             }
+            long tagTableStart = dataLength;
+            ByteBuffer tags = tagCache
+                .getTags(
+                    messageId,
+                    dataLength,
+                    firstChunk,
+                    chunks,
+                    (offset, length) -> readAligned(normalizedPath, filePath, tagTableStart + offset, length, arena)
+                        .toArray(ValueLayout.JAVA_BYTE)
+                );
 
             for (int blockIndex = 0; blockIndex < chunks; blockIndex++) {
                 chunk = firstChunk + blockIndex;
@@ -154,7 +188,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
                         fileKey,
                         chunk,
                         ciphertext.asSlice(position, length).asByteBuffer(),
-                        tags.asSlice((long) blockIndex * ChunkCipher.TAG_LENGTH, ChunkCipher.TAG_LENGTH).asByteBuffer(),
+                        tags.slice(blockIndex * ChunkCipher.TAG_LENGTH, ChunkCipher.TAG_LENGTH),
                         result[blockIndex].segment().asSlice(0, length).asByteBuffer()
                     );
             }
@@ -164,6 +198,8 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             success = true;
             return result;
         } catch (AEADBadTagException e) {
+            // Don't keep a tag page that may have been read badly; the next load reads it again.
+            tagCache.invalidate(messageId, dataLength, chunk);
             throw new CorruptIndexException("encrypted chunk " + chunk + " failed authentication", filePath.toString(), e);
         } catch (NoSuchFileException e) {
             throw e;

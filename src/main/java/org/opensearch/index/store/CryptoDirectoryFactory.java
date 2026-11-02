@@ -536,7 +536,8 @@ public class CryptoDirectoryFactory implements IndexStorePlugin.DirectoryFactory
             resources.getSegmentPool(),
             keyResolver,
             encryptionMetadataCache,
-            resources.getFileChannelCache()
+            resources.getFileChannelCache(),
+            resources.getChunkTagCache()
         );
 
         // Cache architecture: One shared Caffeine cache storage, multiple wrapper instances
