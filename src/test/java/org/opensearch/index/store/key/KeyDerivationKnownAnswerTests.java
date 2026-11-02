@@ -77,7 +77,7 @@ public class KeyDerivationKnownAnswerTests extends OpenSearchTestCase {
         for (int i = 0; i < 20; i++) {
             byte[] key = randomByteArrayOfLength(32);
             byte[] fixedInput = randomByteArrayOfLength(randomIntBetween(1, 60));
-            int length = randomFrom(16, 24, 32);
+            int length = randomIntBetween(1, 200);
             assertArrayEquals(
                 KeyDerivation.counterModeHmacSha384(key, fixedInput, length),
                 AwsLcKeyDerivation.counterModeHmacSha384(key, fixedInput, length)

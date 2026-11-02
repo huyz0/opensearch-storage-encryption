@@ -163,7 +163,9 @@ To get a plugin that only runs in FIPS mode, build it with OpenSearch's own FIPS
 
 AWS-LC's jar holds a native library for one architecture, so the FIPS build makes one zip per architecture
 (`storage-encryption-<version>-fips-linux-x86_64.zip` or `...-fips-linux-aarch_64.zip`). Install the one that
-matches the node.
+matches the node. AWS-LC unpacks its native library into `java.io.tmpdir` at startup, so that directory must
+allow executables: on a host that mounts `/tmp` with `noexec`, point OpenSearch's temp directory
+(`OPENSEARCH_TMPDIR`) somewhere else, or the plugin falls back to `BCFIPS`.
 
 That plugin refuses to start (when `plugins.crypto.enabled` is true) on a node that is not in approved-only
 mode, instead of silently falling back to a non-validated provider. The same flag runs the unit, internal

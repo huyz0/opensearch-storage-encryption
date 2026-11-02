@@ -56,6 +56,11 @@ public class CryptoProvidersTests extends OpenSearchTestCase {
         expectThrows(IllegalStateException.class, () -> CryptoProviders.selfTest(SUN));
     }
 
+    public void testCtrSelfTestPassesWithChosenCtrProvider() {
+        CryptoProviders.selfTestCtr(CryptoProviders.ctrProvider());
+        expectThrows(IllegalStateException.class, () -> CryptoProviders.selfTestCtr(SUN));
+    }
+
     public void testFipsModePrefersAwsLcWhenItLoads() {
         Provider awsLc = new Provider(CryptoProviders.AWS_LC_PROVIDER, "1", "stub") {
         };

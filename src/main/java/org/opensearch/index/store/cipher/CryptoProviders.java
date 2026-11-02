@@ -18,6 +18,7 @@ import java.util.function.Function;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 import org.apache.logging.log4j.LogManager;
@@ -107,7 +108,7 @@ public final class CryptoProviders {
     }
 
     /**
-     * Picks the provider, then runs an AES-256-GCM known-answer test with it. Call at node startup so
+     * Picks the providers, then runs AES-256-GCM and AES-256-CTR known-answer tests with them. Call at node startup so
      * a misconfigured node fails there instead of on the first encrypted write.
      *
      * @throws IllegalStateException if no usable provider is available or the self-test fails
@@ -115,6 +116,7 @@ public final class CryptoProviders {
     public static void checkAtStartup() {
         Resolved r = resolve();
         selfTest(r.provider);
+        selfTestCtr(r.ctrProvider);
         LOGGER
             .info(
                 "storage encryption uses JCE provider [{}], AES-CTR provider [{}] (FIPS mode: {}, crypto.standard: {})",
@@ -208,13 +210,22 @@ public final class CryptoProviders {
                 LOGGER.warn("AWS-LC provider on the classpath is not the FIPS build, using Bouncy Castle FIPS");
                 return null;
             }
+            if (Boolean.TRUE.equals(type.getMethod("isExperimentalFips").invoke(provider))) {
+                LOGGER
+                    .warn(
+                        "AWS-LC provider on the classpath is an experimental FIPS build, not the validated module, using Bouncy Castle FIPS"
+                    );
+                return null;
+            }
             Object selfTests = type.getMethod("runSelfTests").invoke(provider);
             if ("PASSED".equals(String.valueOf(selfTests)) == false) {
                 LOGGER.warn("AWS-LC provider self-tests returned [{}], using Bouncy Castle FIPS", selfTests);
                 return null;
             }
+            type.getMethod("assertHealthy").invoke(provider);
             return provider;
         } catch (ReflectiveOperationException | LinkageError | RuntimeException e) {
+            // includes assertHealthy() failing (InvocationTargetException)
             LOGGER.warn("AWS-LC provider is unusable, using Bouncy Castle FIPS", e);
             return null;
         }
@@ -265,6 +276,26 @@ public final class CryptoProviders {
     private static final byte[] KAT_EXPECTED = HexFormat
         .of()
         .parseHex("cea7403d4d606b6e074ec5d3baf39d18" + "d0d1c8a799996bf0265b98b5d48ab919");
+
+    // AES-256-CTR, NIST SP 800-38A F.5.5, first block.
+    private static final byte[] CTR_KAT_KEY = HexFormat
+        .of()
+        .parseHex("603deb1015ca71be2b73aef0857d7781" + "1f352c073b6108d72d9810a30914dff4");
+    private static final byte[] CTR_KAT_IV = HexFormat.of().parseHex("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff");
+    private static final byte[] CTR_KAT_PLAINTEXT = HexFormat.of().parseHex("6bc1bee22e409f96e93d7e117393172a");
+    private static final byte[] CTR_KAT_EXPECTED = HexFormat.of().parseHex("601ec313775789a5b7a7f504bbf3d228");
+
+    static void selfTestCtr(Provider provider) {
+        try {
+            Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding", provider);
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(CTR_KAT_KEY, "AES"), new IvParameterSpec(CTR_KAT_IV));
+            if (MessageDigest.isEqual(CTR_KAT_EXPECTED, cipher.doFinal(CTR_KAT_PLAINTEXT)) == false) {
+                throw new IllegalStateException("AES-256-CTR known-answer test failed for provider [" + provider.getName() + "]");
+            }
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("AES-256-CTR self-test failed for provider [" + provider.getName() + "]", e);
+        }
+    }
 
     static void selfTest(Provider provider) {
         try {
