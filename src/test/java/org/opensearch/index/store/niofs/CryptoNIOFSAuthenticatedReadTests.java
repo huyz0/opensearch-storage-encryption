@@ -99,7 +99,7 @@ public class CryptoNIOFSAuthenticatedReadTests extends OpenSearchTestCase {
         byte[] data = randomByteArrayOfLength(2 * CHUNK + 10);
         write(FILE, data);
         int chunk = randomIntBetween(0, 2);
-        flipBit(data.length + (long) chunk * ChunkCipher.TAG_LENGTH + randomIntBetween(0, ChunkCipher.TAG_LENGTH - 1));
+        flipBit(data.length + (long) chunk * ChunkCipher.ENTRY_LENGTH + randomIntBetween(0, ChunkCipher.ENTRY_LENGTH - 1));
 
         try (Directory d = openDirectory(); IndexInput in = d.openInput(FILE, IOContext.DEFAULT)) {
             in.seek((long) chunk * CHUNK);
@@ -112,7 +112,7 @@ public class CryptoNIOFSAuthenticatedReadTests extends OpenSearchTestCase {
         write(FILE, data);
         // Swap chunk 0 and chunk 1 together with their tags: each is still a valid sealed chunk.
         swap(0, CHUNK, CHUNK);
-        swap(data.length, data.length + ChunkCipher.TAG_LENGTH, ChunkCipher.TAG_LENGTH);
+        swap(data.length, data.length + ChunkCipher.ENTRY_LENGTH, ChunkCipher.ENTRY_LENGTH);
 
         try (Directory d = openDirectory(); IndexInput in = d.openInput(FILE, IOContext.DEFAULT)) {
             expectThrows(CorruptIndexException.class, () -> in.readByte());
@@ -126,9 +126,9 @@ public class CryptoNIOFSAuthenticatedReadTests extends OpenSearchTestCase {
         write(FILE, data);
         // Drop the last chunk and its tag but keep the authenticated footer.
         byte[] file = Files.readAllBytes(dir.resolve(FILE));
-        byte[] cut = new byte[file.length - CHUNK - ChunkCipher.TAG_LENGTH];
+        byte[] cut = new byte[file.length - CHUNK - ChunkCipher.ENTRY_LENGTH];
         System.arraycopy(file, 0, cut, 0, 2 * CHUNK);
-        System.arraycopy(file, data.length, cut, 2 * CHUNK, 2 * ChunkCipher.TAG_LENGTH);
+        System.arraycopy(file, data.length, cut, 2 * CHUNK, 2 * ChunkCipher.ENTRY_LENGTH);
         int footerStart = file.length - EncryptionMetadataTrailer.MIN_FOOTER_SIZE;
         System
             .arraycopy(

@@ -182,7 +182,7 @@ public class BufferPoolAuthenticatedReadTests extends OpenSearchTestCase {
         byte[] data = randomByteArrayOfLength(3 * CHUNK + 100);
         write("_3.tim", data);
         int chunk = randomIntBetween(0, 3);
-        flipBit("_3.tim", data.length + (long) chunk * ChunkCipher.TAG_LENGTH + randomIntBetween(0, ChunkCipher.TAG_LENGTH - 1));
+        flipBit("_3.tim", data.length + (long) chunk * ChunkCipher.ENTRY_LENGTH + randomIntBetween(0, ChunkCipher.ENTRY_LENGTH - 1));
         assertChunkCorrupt("_3.tim", chunk, data);
     }
 
@@ -199,7 +199,7 @@ public class BufferPoolAuthenticatedReadTests extends OpenSearchTestCase {
         write("_5.tim", data);
         // Swap chunks 0 and 1 together with their tags: each is still a validly sealed chunk.
         swap("_5.tim", 0, CHUNK, CHUNK);
-        swap("_5.tim", data.length, data.length + ChunkCipher.TAG_LENGTH, ChunkCipher.TAG_LENGTH);
+        swap("_5.tim", data.length, data.length + ChunkCipher.ENTRY_LENGTH, ChunkCipher.ENTRY_LENGTH);
         Path file = path.resolve("_5.tim");
         expectThrows(CorruptIndexException.class, () -> loader.load(file, 0, 1, 1000));
         expectThrows(CorruptIndexException.class, () -> loader.load(file, CHUNK, 1, 1000));
@@ -314,7 +314,7 @@ public class BufferPoolAuthenticatedReadTests extends OpenSearchTestCase {
         byte[] data = randomByteArrayOfLength(3 * CHUNK + 100);
         write("_13.tim", data);
         Path file = path.resolve("_13.tim");
-        long tagPosition = data.length + ChunkCipher.TAG_LENGTH; // chunk 1's tag
+        long tagPosition = data.length + ChunkCipher.ENTRY_LENGTH; // chunk 1's tag-table entry
         ByteBuffer original = ByteBuffer.allocate(1);
         try (FileChannel ch = FileChannel.open(file, StandardOpenOption.READ)) {
             ch.read(original, tagPosition);

@@ -53,7 +53,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
      */
     private static final class ChunkScratch {
         final ByteBuffer ciphertext = ByteBuffer.allocate(ChunkCipher.CHUNK_SIZE);
-        final ByteBuffer tag = ByteBuffer.allocate(ChunkCipher.TAG_LENGTH);
+        final ByteBuffer tag = ByteBuffer.allocate(ChunkCipher.ENTRY_LENGTH);
         final ByteBuffer plaintext = ByteBuffer.allocate(ChunkCipher.CHUNK_SIZE);
         Object file;
         long chunk = -1;
@@ -174,7 +174,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
 
         int length = ChunkCipher.chunkLength(chunk, dataLength);
         readFully(scratch.ciphertext.clear().limit(length), chunk << ChunkCipher.CHUNK_SIZE_POWER);
-        readFully(scratch.tag.clear(), dataLength + chunk * ChunkCipher.TAG_LENGTH);
+        readFully(scratch.tag.clear(), dataLength + chunk * ChunkCipher.ENTRY_LENGTH);
 
         try {
             ChunkCipher.open(keySpec, chunk, scratch.ciphertext.flip(), scratch.tag.flip(), scratch.plaintext.clear());

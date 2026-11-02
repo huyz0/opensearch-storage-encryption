@@ -16,7 +16,7 @@ import org.opensearch.test.OpenSearchTestCase;
 
 public class ChunkTagCacheTests extends OpenSearchTestCase {
 
-    private static final int TAG = ChunkCipher.TAG_LENGTH;
+    private static final int TAG = ChunkCipher.ENTRY_LENGTH;
     private static final int PAGE = ChunkTagCache.TAGS_PER_PAGE;
 
     /** A tag table where every byte encodes its own offset, so misplaced bytes are visible. */

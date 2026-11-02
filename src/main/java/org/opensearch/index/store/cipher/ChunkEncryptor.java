@@ -14,7 +14,7 @@ import javax.crypto.Cipher;
 
 /**
  * Streams plaintext into {@link ChunkCipher} chunks. Ciphertext goes to the output as each chunk
- * fills; the chunk tags are kept in memory (16 bytes per 8 KiB) and written as the tag table by
+ * fills; the chunks' tag-table entries (nonce and tag, 28 bytes per 8 KiB) are kept in memory and written as the tag table by
  * {@link #finish}. Not thread-safe: one instance per file being written.
  *
  * @opensearch.internal
@@ -24,8 +24,8 @@ public final class ChunkEncryptor {
     private final Cipher cipher = ChunkCipher.newCipher();
     private final Key fileKey;
     private final byte[] chunk = new byte[ChunkCipher.CHUNK_SIZE];
-    private final byte[] sealed = new byte[ChunkCipher.CHUNK_SIZE + ChunkCipher.TAG_LENGTH];
-    private byte[] tags = new byte[64 * ChunkCipher.TAG_LENGTH];
+    private final byte[] sealed = new byte[ChunkCipher.CHUNK_SIZE + ChunkCipher.ENTRY_LENGTH];
+    private byte[] tags = new byte[64 * ChunkCipher.ENTRY_LENGTH];
     private int tagBytes;
     private int chunkPosition;
     private long chunkIndex;
@@ -93,8 +93,8 @@ public final class ChunkEncryptor {
         if (tagBytes == tags.length) {
             tags = Arrays.copyOf(tags, Math.addExact(tags.length, tags.length));
         }
-        System.arraycopy(sealed, length, tags, tagBytes, ChunkCipher.TAG_LENGTH);
-        tagBytes += ChunkCipher.TAG_LENGTH;
+        System.arraycopy(sealed, length, tags, tagBytes, ChunkCipher.ENTRY_LENGTH);
+        tagBytes += ChunkCipher.ENTRY_LENGTH;
         chunkIndex++;
         dataLength += length;
     }

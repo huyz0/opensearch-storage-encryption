@@ -186,13 +186,18 @@ public class CipherBenchmarks {
         return p;
     }
 
+    /** A distinct nonce per chunk index; the raw-cipher variants measure the cipher, not nonce generation. */
+    private static byte[] nonce(long chunkIndex) {
+        return ByteBuffer.allocate(ChunkCipher.NONCE_LENGTH).putLong(4, chunkIndex).array();
+    }
+
     private void seal(long chunkIndex) throws Exception {
-        sealCipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(ChunkCipher.TAG_LENGTH * Byte.SIZE, ChunkCipher.nonce(chunkIndex)));
+        sealCipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(ChunkCipher.TAG_LENGTH * Byte.SIZE, nonce(chunkIndex)));
         sealCipher.doFinal(plaintext, 0, size, sealed, 0);
     }
 
     private void initOpen() throws Exception {
-        openCipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(ChunkCipher.TAG_LENGTH * Byte.SIZE, ChunkCipher.nonce(0)));
+        openCipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(ChunkCipher.TAG_LENGTH * Byte.SIZE, nonce(0)));
     }
 
     /**
