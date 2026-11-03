@@ -63,15 +63,8 @@ public final class CryptoProviders {
     private CryptoProviders() {}
 
     /** What was chosen for this JVM. */
-    private record Resolved(
-        Provider provider,
-        SecureRandom random,
-        String randomAlgorithm,
-        Provider randomProvider,
-        AwsLcFips awsLc,
-        boolean fips,
-        Map<String, Provider> pinned
-    ) {
+    private record Resolved(Provider provider, SecureRandom random, String randomAlgorithm, Provider randomProvider, AwsLcFips awsLc,
+        boolean fips, Map<String, Provider> pinned) {
     }
 
     static final String GCM = "AES/GCM/NoPadding";
@@ -104,7 +97,11 @@ public final class CryptoProviders {
      * time, and every later call uses the same provider.
      */
     public static Cipher cipher(String transformation) throws GeneralSecurityException {
-        return Cipher.getInstance(transformation, pinned(resolve(), "Cipher." + transformation, () -> Cipher.getInstance(transformation).getProvider()));
+        return Cipher
+            .getInstance(
+                transformation,
+                pinned(resolve(), "Cipher." + transformation, () -> Cipher.getInstance(transformation).getProvider())
+            );
     }
 
     /** Returns a JCE MAC for {@code algorithm} from the provider pinned for it; see {@link #cipher}. */
