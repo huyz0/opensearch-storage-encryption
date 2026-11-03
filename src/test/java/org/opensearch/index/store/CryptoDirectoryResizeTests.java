@@ -42,11 +42,14 @@ import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 
+import com.carrotsearch.randomizedtesting.annotations.ThreadLeakFilters;
+
 /**
  * Tests for clone/resize operations in CryptoDirectoryFactory.
  * Verifies that keyfiles are correctly copied from source to target indices
  * during clone, split, and shrink operations.
  */
+@ThreadLeakFilters(filters = BouncyCastleThreadLeakFilter.class)
 public class CryptoDirectoryResizeTests extends LuceneTestCase {
 
     private Path tempDir;

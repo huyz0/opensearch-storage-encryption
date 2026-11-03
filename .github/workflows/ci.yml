@@ -232,12 +232,60 @@ jobs:
           path: |
             ./build/reports/
 
+  aws-lc-fips:
+    name: Build AWS-LC FIPS (${{ matrix.platform }})
+    # The FIPS build bundles the AWS-LC FIPS 3.0.0 module. It is built on RHEL 8's glibc (2.28) so the library
+    # loads on every Linux distribution OpenSearch supports.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # dnf on the arm runner can take over half an hour on slow mirror days.
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    container: almalinux:8
+    steps:
+      - name: Install build tools
+        run: |
+          dnf -y --enablerepo=powertools install epel-release
+          dnf -y --enablerepo=powertools install git cmake ninja-build golang perl gcc gcc-c++ binutils patchelf
+          gcc --version | head -1; go version; cmake --version | head -1
+
+      - name: Checkout opensearch-storage-encryption
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Build AWS-LC FIPS
+        run: scripts/build-aws-lc-fips.sh "$PWD/aws-lc-fips/libawslc-fips-crypto.so" "$RUNNER_TEMP/aws-lc-work"
+
+      - name: Check the glibc it needs and its SONAME
+        run: |
+          readelf -d aws-lc-fips/libawslc-fips-crypto.so | grep -q 'Library soname: \[libawslc-fips-crypto.so\]'
+          newest=$(objdump -T aws-lc-fips/libawslc-fips-crypto.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "newest glibc symbol version: $newest"
+          [ "$(printf '%s\nGLIBC_2.28\n' "$newest" | sort -V | tail -1)" = "GLIBC_2.28" ]
+
+      - name: Upload library
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: aws-lc-fips-${{ matrix.platform }}
+          path: aws-lc-fips/libawslc-fips-crypto.so
+          if-no-files-found: error
+
   fips-tests:
     name: FIPS 140-3 Tests
     # Builds with -Pcrypto.standard=FIPS-140-3 and runs every test suite with Bouncy Castle FIPS in
     # approved-only mode (the YAML REST cluster runs with OPENSEARCH_FIPS_MODE=true).
-    needs: ["Get-CI-Image-Tag", "build"]
+    needs: ["Get-CI-Image-Tag", "build", "aws-lc-fips"]
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read
     container:
@@ -260,11 +308,17 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
+      - name: Download AWS-LC FIPS
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: aws-lc-fips-linux-x86_64
+          path: aws-lc-fips
+
       - name: Switch to ci-runner user and run tests in FIPS mode
         run: |
           chown -R ci-runner:ci-runner $GITHUB_WORKSPACE
           chmod +x $GITHUB_WORKSPACE/gradlew
-          su ci-runner -c "export JAVA_HOME=$JAVA_HOME && export GRADLE_OPTS='$GRADLE_OPTS' && cd $GITHUB_WORKSPACE && ./gradlew test internalClusterTest yamlRestTest -x jcstress -Pcrypto.standard=FIPS-140-3 -Dbuild.snapshot=false"
+          su ci-runner -c "export JAVA_HOME=$JAVA_HOME && export GRADLE_OPTS='$GRADLE_OPTS' && cd $GITHUB_WORKSPACE && ./gradlew test internalClusterTest yamlRestTest -x jcstress -Pcrypto.standard=FIPS-140-3 -Paws_lc.library=$GITHUB_WORKSPACE/aws-lc-fips/libawslc-fips-crypto.so -Dbuild.snapshot=false"
 
       - name: Upload test reports
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
