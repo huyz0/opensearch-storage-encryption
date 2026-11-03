@@ -144,29 +144,29 @@ echo "your-session-token" | bin/opensearch-keystore add -x kms.session_token
 
 On an OpenSearch node running in FIPS mode (`OPENSEARCH_FIPS_MODE=true` on a FIPS distribution, which runs
 Bouncy Castle FIPS in approved-only mode), the plugin uses only FIPS 140-3 validated modules. The FIPS build
-bundles the AWS-LC FIPS module (Amazon Corretto Crypto Provider, FIPS build) and uses it for AES-GCM
-decryption, HMAC, key derivation and random numbers; it is several times faster than Bouncy Castle FIPS and has native
-code for both x86_64 and aarch64. AWS-LC's provider has no AES-CTR, so translog encryption uses `BCFIPS`, and
-AES-GCM encryption uses `BCFIPS` so the nonce is generated inside the module (see below). If
-AWS-LC fails to load or fails its self-tests, the plugin logs a warning and uses `BCFIPS` for everything.
-Outside FIPS mode the plugin uses the JDK's built-in `SunJCE`. The node log says which providers are in use:
+bundles the AWS-LC FIPS 3.0.0 module (`libcrypto` built from AWS-LC's validated `AWS-LC-FIPS-3.0.0` release by
+`scripts/build-aws-lc-fips.sh`) and calls it directly through Java's Foreign Function and Memory API for AES-GCM,
+AES-CTR (translog) and key derivation. It has native code for both x86_64 and aarch64. Everything else (random
+message IDs, self-tests) uses `BCFIPS`. If AWS-LC fails to load or fails its self-tests, the plugin refuses to
+start; the default build, which bundles no native code, uses `BCFIPS` for everything in FIPS mode. Outside FIPS mode the plugin uses the JDK's
+built-in `SunJCE` and loads no native crypto. The node log says what is in use:
 
 ```
-storage encryption uses JCE provider [AmazonCorrettoCryptoProvider], AES-GCM seal provider [BCFIPS], AES-CTR provider [BCFIPS] (FIPS mode: true, crypto.standard: FIPS-140-3)
+storage encryption uses [AWS-LC FIPS 3.0.0 (.../plugins/storage-encryption/native/linux-x86_64/libawslc-fips-crypto.so)] for AES-GCM, AES-CTR and key derivation, JCE provider [BCFIPS] (FIPS mode: true, crypto.standard: FIPS-140-3)
 ```
 
 To get a plugin that only runs in FIPS mode, build it with OpenSearch's own FIPS build parameter:
 
 ```bash
-./gradlew assemble -Pcrypto.standard=FIPS-140-3                                  # build host's architecture
-./gradlew assemble -Pcrypto.standard=FIPS-140-3 -Paccp.classifier=linux-aarch_64 # Graviton, Axion, ...
+./gradlew assemble -Pcrypto.standard=FIPS-140-3   # builds AWS-LC FIPS for the build host (needs cmake, ninja, Go, Perl, a C compiler)
+./gradlew assemble -Pcrypto.standard=FIPS-140-3 -Paws_lc.libraries=<dir>   # <dir>/linux-<arch>/libawslc-fips-crypto.so, prebuilt
 ```
 
-AWS-LC's jar holds a native library for one architecture, so the FIPS build makes one zip per architecture
-(`storage-encryption-<version>-fips-linux-x86_64.zip` or `...-fips-linux-aarch_64.zip`). Install the one that
-matches the node. AWS-LC unpacks its native library into `java.io.tmpdir` at startup, so that directory must
-allow executables: on a host that mounts `/tmp` with `noexec`, point OpenSearch's temp directory
-(`OPENSEARCH_TMPDIR`) somewhere else, or the plugin falls back to `BCFIPS`.
+The first gives `storage-encryption-fips-linux-<arch>.zip` for the build host's architecture. The second bundles
+every architecture found under `<dir>` into one `storage-encryption-fips.zip`; CI builds the libraries in
+`almalinux:8` (glibc 2.28) so they load on any current Linux distribution. The library is loaded from the plugin's
+own `native/` directory and kept private to the plugin (`RTLD_DEEPBIND`), so other plugins that bring their own
+OpenSSL or AWS-LC do not interfere with it, and it registers no JCE provider.
 
 That plugin refuses to start (when `plugins.crypto.enabled` is true) on a node that is not in approved-only
 mode, instead of silently falling back to a non-validated provider. The same flag runs the unit, internal
@@ -175,9 +175,8 @@ checks JCE provider signatures with an algorithm the FIPS provider list does not
 
 Per-file keys come from the NIST SP 800-108 counter-mode KDF with HMAC-SHA-384. In FIPS mode it runs inside the
 validated module (AWS-LC, or Bouncy Castle FIPS as the fallback). AES-GCM nonces for index chunks and footers
-are generated at random inside the module and stored next to each tag (FIPS 140-3 IG C.H). AWS-LC's Java provider
-fills the IV outside the native module, so in FIPS mode chunks are sealed (written) with `BCFIPS`, which generates
-the IV itself; reads still decrypt with AWS-LC. Not covered: the `dummy` key provider (test only) and key provider plugins such as
+are generated at random inside the module (AWS-LC's `EVP_aead_aes_256_gcm_randnonce`) and stored next to each tag
+(FIPS 140-3 IG C.H). Not covered: the `dummy` key provider (test only) and key provider plugins such as
 `crypto-kms` are outside this plugin's control.
 
 ## Usage
