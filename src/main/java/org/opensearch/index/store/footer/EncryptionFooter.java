@@ -110,7 +110,7 @@ public class EncryptionFooter {
                 this.footerAuthTag = Arrays.copyOfRange(entry, nonceSize, entry.length);
             } else {
                 // No IV given: the provider generates a random one (in FIPS mode inside the module).
-                Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding", CryptoProviders.provider());
+                Cipher cipher = CryptoProviders.cipher("AES/GCM/NoPadding");
                 cipher.init(Cipher.ENCRYPT_MODE, key, CryptoProviders.nonceRandom());
                 nonce = cipher.getIV();
                 cipher.updateAAD(body);
@@ -295,7 +295,7 @@ public class EncryptionFooter {
                 return true;
             }
             byte[] nonce = Arrays.copyOfRange(footerData, 0, nonceSize);
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding", CryptoProviders.provider());
+            Cipher cipher = CryptoProviders.cipher("AES/GCM/NoPadding");
             cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, nonce));
             cipher.updateAAD(body);
             cipher.doFinal(expectedTag);

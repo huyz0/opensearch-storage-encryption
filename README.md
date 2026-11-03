@@ -148,12 +148,18 @@ bundles the AWS-LC FIPS 3.0.0 module (`libcrypto` built from AWS-LC's validated 
 `scripts/build-aws-lc-fips.sh`) and calls it directly through Java's Foreign Function and Memory API for AES-GCM,
 AES-CTR (translog) and key derivation. It has native code for both x86_64 and aarch64. Everything else (random
 message IDs, self-tests) uses `BCFIPS`. If AWS-LC fails to load or fails its self-tests, the plugin refuses to
-start; the default build, which bundles no native code, uses `BCFIPS` for everything in FIPS mode. Outside FIPS mode the plugin uses the JDK's
-built-in `SunJCE` and loads no native crypto. The node log says what is in use:
+start; the default build, which bundles no native code, uses `BCFIPS` for everything in FIPS mode. The default build bundles no native code
+and gets every algorithm from the JVM's provider order, as OpenSearch core does: no provider is named, so the
+node's `java.security` decides. That is normally the JDK's `SunJCE`, and `BCFIPS` in FIPS mode, where OpenSearch
+puts it first and removes `SunJCE`. If core or an operator changes the order, the plugin follows. The node log says
+what is in use:
 
 ```
-storage encryption uses [AWS-LC FIPS 3.0.0 (.../plugins/storage-encryption/native/linux-x86_64/libawslc-fips-crypto.so)] for AES-GCM, AES-CTR and key derivation, JCE provider [BCFIPS] (FIPS mode: true, crypto.standard: FIPS-140-3)
+storage encryption uses [AWS-LC FIPS 3.0.0 (.../plugins/storage-encryption/native/linux-x86_64/libawslc-fips-crypto.so)] for AES-GCM, AES-CTR and key derivation; JCE providers from the JVM's order: AES-GCM [BCFIPS], AES-CTR [BCFIPS], HmacSHA384 [BCFIPS], SecureRandom [BCFIPS] (FIPS mode: true, crypto.standard: FIPS-140-3)
 ```
+
+In FIPS mode the default build relies on the first provider generating GCM nonces inside its own module, as
+`BCFIPS` does (FIPS 140-3 IG C.H); the startup self-test checks that the cipher generated the nonce.
 
 To get a plugin that only runs in FIPS mode, build it with OpenSearch's own FIPS build parameter:
 
@@ -223,7 +229,7 @@ Configure these when creating an index. Setting `index.store.type` to `"cryptofs
 | `index.store.crypto.kms.key_arn` | AWS KMS key ARN (master key) **(required when `key_provider` is `aws-kms`)** | String | Valid AWS KMS ARN format |
 | `index.store.crypto.kms.encryption_context` | AWS KMS encryption context (optional) | String | Comma-separated `key=value` pairs, merged with any default context taken from the cluster's repository settings |
 
-The JCE provider for reads is fixed to `SunJCE`; there is no setting for it.
+There is no setting for the JCE provider: the plugin uses the JVM's provider order (see FIPS 140-3 Mode above).
 
 **How Encryption Works:**
 - When you set `index.store.type: "cryptofs"`, the plugin automatically wraps the node's default store type with encryption
@@ -400,7 +406,7 @@ Use `-Pjmh.includes` to run a specific benchmark method (regex match):
 
 ### Hardware acceleration
 
-Encryption uses the JDK's own AES-GCM (SunJCE) and AES-CTR. HotSpot compiles both to CPU crypto instructions: AES-NI and PCLMULQDQ on x86_64 (with wider VAES/VPCLMULQDQ paths on CPUs that have them), and the ARMv8 AES and PMULL instructions on aarch64. Nothing needs to be configured. They are on whenever the CPU reports those features, which the AWS and GCP instance types listed below all do, including Graviton and Axion. Without them AES-GCM was about 70 times slower in our measurements, so check the JVM flags (`UseAESIntrinsics`, `UseAESCTRIntrinsics`, `UseGHASHIntrinsics`) if throughput looks wrong. A JVM option that turns them off is the usual culprit.
+With the JDK's default provider order, encryption uses SunJCE's AES-GCM and AES-CTR. HotSpot compiles both to CPU crypto instructions: AES-NI and PCLMULQDQ on x86_64 (with wider VAES/VPCLMULQDQ paths on CPUs that have them), and the ARMv8 AES and PMULL instructions on aarch64. Nothing needs to be configured. They are on whenever the CPU reports those features, which the AWS and GCP instance types listed below all do, including Graviton and Axion. Without them AES-GCM was about 70 times slower in our measurements, so check the JVM flags (`UseAESIntrinsics`, `UseAESCTRIntrinsics`, `UseGHASHIntrinsics`) if throughput looks wrong. A JVM option that turns them off is the usual culprit.
 
 `scripts/benchmark-cipher.sh` measures all of this on the machine it runs on. It prints the CPU's crypto features and the JVM's intrinsic flags, then runs `CipherBenchmarks` with each provider: SunJCE with intrinsics, SunJCE without them, Amazon Corretto Crypto Provider (AWS-LC; regular and FIPS builds) and Bouncy Castle FIPS. It also runs `openssl speed` as a native ceiling. The provider jars are fetched from Maven Central into `build/bench-providers`. Results and a summary table go to `bench-results/<instance>-<arch>-<time>/`.
 

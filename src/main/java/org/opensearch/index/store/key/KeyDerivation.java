@@ -103,7 +103,7 @@ public final class KeyDerivation {
     static byte[] counterModeHmacSha384(byte[] key, byte[] fixedInput, int keyLength) {
         byte[] block = new byte[HASH_LENGTH];
         try {
-            Mac mac = Mac.getInstance(HMAC_ALGORITHM, CryptoProviders.provider());
+            Mac mac = CryptoProviders.mac(HMAC_ALGORITHM);
             mac.init(new SecretKeySpec(key, HMAC_ALGORITHM));
             byte[] out = new byte[keyLength];
             for (int i = 1, offset = 0; offset < keyLength; i++, offset += HASH_LENGTH) {

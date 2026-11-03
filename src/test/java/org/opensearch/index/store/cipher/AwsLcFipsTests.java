@@ -68,7 +68,7 @@ public class AwsLcFipsTests extends OpenSearchTestCase {
             assertArrayEquals(plain, out);
 
             // The JCE provider opens what AWS-LC sealed: ciphertext || tag under the stored nonce.
-            Cipher jce = Cipher.getInstance("AES/GCM/NoPadding", CryptoProviders.provider());
+            Cipher jce = CryptoProviders.cipher("AES/GCM/NoPadding");
             jce.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, Arrays.copyOf(entry, 12)));
             jce.updateAAD(aad);
             byte[] withTag = new byte[ct.length + 16];
@@ -83,7 +83,7 @@ public class AwsLcFipsTests extends OpenSearchTestCase {
         byte[] nonce = randomByteArrayOfLength(12);
         byte[] aad = randomByteArrayOfLength(8);
         byte[] plain = randomByteArrayOfLength(ChunkCipher.CHUNK_SIZE);
-        Cipher jce = Cipher.getInstance("AES/GCM/NoPadding", CryptoProviders.provider());
+        Cipher jce = CryptoProviders.cipher("AES/GCM/NoPadding");
         jce.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(128, nonce));
         jce.updateAAD(aad);
         byte[] sealed = jce.doFinal(plain);
@@ -166,7 +166,7 @@ public class AwsLcFipsTests extends OpenSearchTestCase {
         byte[] iv = randomByteArrayOfLength(16);
         iv[15] = (byte) 0xfe; // cross a counter-byte carry
         byte[] plain = randomByteArrayOfLength(4096);
-        Cipher jce = Cipher.getInstance("AES/CTR/NoPadding", CryptoProviders.provider());
+        Cipher jce = CryptoProviders.cipher("AES/CTR/NoPadding");
         jce.init(Cipher.ENCRYPT_MODE, key, new IvParameterSpec(iv));
         byte[] expected = jce.doFinal(plain);
         for (int i = 0; i < 100; i++) {
@@ -183,7 +183,7 @@ public class AwsLcFipsTests extends OpenSearchTestCase {
         byte[] secret = randomByteArrayOfLength(32);
         byte[] fixedInput = randomByteArrayOfLength(randomIntBetween(0, 64));
         int length = randomIntBetween(1, 200);
-        Mac mac = Mac.getInstance("HmacSHA384", CryptoProviders.provider());
+        Mac mac = CryptoProviders.mac("HmacSHA384");
         mac.init(new SecretKeySpec(secret, "HmacSHA384"));
         byte[] expected = new byte[length];
         for (int i = 1, off = 0; off < length; i++, off += 48) {
