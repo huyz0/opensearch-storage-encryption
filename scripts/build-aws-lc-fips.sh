@@ -6,7 +6,8 @@
 #
 # Builds the AWS-LC-FIPS-3.0.0 tag, the FIPS 140-3 validated release, for the host architecture with
 # -DFIPS=1 as AWS-LC's crypto/fipsmodule/FIPS.md describes; the module's integrity check is computed at build
-# time and verified every time the library loads. Needs git, cmake, ninja, Go, Perl and a C compiler (clang or gcc).
+# time and verified every time the library loads. Needs git, cmake, ninja, Go, Perl, patchelf and a C compiler
+# (clang or gcc).
 set -euo pipefail
 
 TAG=AWS-LC-FIPS-3.0.0
@@ -19,7 +20,7 @@ mkdir -p "$work" "$(dirname "$out")"
 out=$(cd "$(dirname "$out")" && pwd)/$(basename "$out")
 work=$(cd "$work" && pwd)
 
-for tool in git cmake ninja go perl; do
+for tool in git cmake ninja go perl patchelf readelf; do
   command -v "$tool" >/dev/null || { echo "build-aws-lc-fips: $tool is required" >&2; exit 1; }
 done
 
@@ -40,5 +41,16 @@ cmake -S "$src" -B "$work/build" -GNinja \
 ninja -C "$work/build" crypto >"$work/ninja.log" 2>&1 || { tail -40 "$work/ninja.log" >&2; exit 1; }
 
 cp "$work/build/crypto/libcrypto.so" "$out.tmp"
+# AWS-LC's SONAME is libcrypto.so. glibc matches an already-loaded library's SONAME against later dlopen calls by
+# bare name, so another component's dlopen("libcrypto.so") would get this module (and RTLD_GLOBAL would promote it
+# into the global scope). Give it a name of its own. The FIPS integrity check covers the module's code and data,
+# not the dynamic section, so it still passes.
+soname=$(basename "$out")
+patchelf --set-soname "$soname" "$out.tmp"
+actual_soname=$(readelf -d "$out.tmp" | sed -n 's/.*Library soname: \[\(.*\)\]/\1/p')
+if [ "$actual_soname" != "$soname" ]; then
+  echo "build-aws-lc-fips: SONAME is '$actual_soname', expected '$soname'" >&2
+  exit 1
+fi
 mv "$out.tmp" "$out"
-echo "built $out from $TAG ($COMMIT)"
+echo "built $out from $TAG ($COMMIT) with $(cc --version | head -1), $(go version), SONAME $soname"

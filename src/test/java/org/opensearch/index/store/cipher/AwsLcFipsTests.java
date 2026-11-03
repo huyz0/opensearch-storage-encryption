@@ -271,6 +271,27 @@ public class AwsLcFipsTests extends OpenSearchTestCase {
         second.selfTest();
     }
 
+    /**
+     * glibc hands an already-loaded library to a later {@code dlopen} of its SONAME, so the bundled library must not
+     * keep AWS-LC's {@code libcrypto.so}: another component's {@code dlopen("libcrypto.so")} would get the module.
+     */
+    public void testBundledLibraryDoesNotAnswerToLibcryptoSoname() throws Throwable {
+        Linker linker = Linker.nativeLinker();
+        MethodHandle dlopen = linker
+            .downcallHandle(
+                linker.defaultLookup().find("dlopen").orElseThrow(),
+                FunctionDescriptor.of(ValueLayout.ADDRESS, ValueLayout.ADDRESS, ValueLayout.JAVA_INT)
+            );
+        try (Arena arena = Arena.ofConfined()) {
+            // RTLD_LAZY | RTLD_NOLOAD: returns a handle only if a loaded library already answers to the name.
+            MemorySegment ours = (MemorySegment) dlopen.invokeExact(arena.allocateFrom(AwsLcFips.LIBRARY_FILE), 0x1 | 0x4);
+            assertFalse("the loaded module answers to its own SONAME", ours.equals(MemorySegment.NULL));
+            MemorySegment generic = (MemorySegment) dlopen.invokeExact(arena.allocateFrom("libcrypto.so"), 0x1 | 0x4);
+            // A system OpenSSL may answer (another test loads one); the bundled module must not.
+            assertNotEquals("the bundled AWS-LC module still answers to dlopen(\"libcrypto.so\")", ours, generic);
+        }
+    }
+
     public void testRejectsAMissingLibrary() {
         IllegalStateException e = expectThrows(IllegalStateException.class, () -> AwsLcFips.load(createTempDir().resolve("nope.so")));
         assertTrue(e.getMessage(), e.getMessage().contains("does not exist"));
