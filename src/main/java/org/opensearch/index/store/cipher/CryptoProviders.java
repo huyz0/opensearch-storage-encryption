@@ -11,7 +11,9 @@ import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.Provider;
 import java.security.SecureRandom;
+import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.Map;
 import java.util.Properties;
 
 import javax.crypto.Cipher;
@@ -29,8 +31,9 @@ import org.apache.logging.log4j.Logger;
  * <p>JCE algorithms come from the JVM's provider order, as in OpenSearch core: no provider is named, so the
  * node's {@code java.security} configuration decides. Outside FIPS mode that is normally the JDK's SunJCE. In
  * FIPS mode (Bouncy Castle FIPS in approved-only mode, which OpenSearch's {@code OPENSEARCH_FIPS_MODE=true} turns
- * on) OpenSearch puts {@value #FIPS_PROVIDER} first and removes SunJCE. The startup log names the provider picked
- * for each algorithm.
+ * on) OpenSearch puts {@value #FIPS_PROVIDER} first and removes SunJCE. The provider the order picks for each
+ * algorithm is pinned the first time it is needed (AES-GCM, AES-CTR, HmacSHA384 and SecureRandom at startup), so a
+ * provider added to the JVM later cannot change what the plugin uses. The startup log names each one.
  *
  * <p>Two builds:
  * <ul>
@@ -60,30 +63,71 @@ public final class CryptoProviders {
     private CryptoProviders() {}
 
     /** What was chosen for this JVM. */
-    private record Resolved(Provider provider, SecureRandom random, AwsLcFips awsLc, boolean fips) {
+    private record Resolved(
+        Provider provider,
+        SecureRandom random,
+        String randomAlgorithm,
+        Provider randomProvider,
+        AwsLcFips awsLc,
+        boolean fips,
+        Map<String, Provider> pinned
+    ) {
     }
 
-    /** Nonce source for JCE sealing: one per thread, so parallel writers do not contend on a shared generator. */
-    private static final ThreadLocal<SecureRandom> NONCE_RANDOM = ThreadLocal.withInitial(SecureRandom::new);
+    static final String GCM = "AES/GCM/NoPadding";
+    static final String CTR = "AES/CTR/NoPadding";
+    static final String HMAC = "HmacSHA384";
 
     /**
-     * Returns a JCE cipher for {@code transformation} from the JVM's provider order, like OpenSearch core: no
-     * provider is named, so the node's {@code java.security} configuration decides (in FIPS mode OpenSearch puts
-     * {@value #FIPS_PROVIDER} first and removes SunJCE).
+     * Nonce source for JCE sealing: one per thread, so parallel writers do not contend on a shared generator. Each
+     * is an instance of the pinned SecureRandom algorithm and provider.
+     */
+    private static final ThreadLocal<SecureRandom> NONCE_RANDOM = ThreadLocal.withInitial(() -> {
+        Resolved r = resolve();
+        try {
+            return SecureRandom.getInstance(r.randomAlgorithm, r.randomProvider);
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("cannot create a [" + r.randomAlgorithm + "] SecureRandom from [" + r.randomProvider + "]", e);
+        }
+    });
+
+    /** Looks up the provider the JVM's order picks for an algorithm. */
+    @FunctionalInterface
+    private interface Lookup {
+        Provider provider() throws GeneralSecurityException;
+    }
+
+    /**
+     * Returns a JCE cipher for {@code transformation} from the provider the JVM's order picked for it, like
+     * OpenSearch core: the plugin names no provider, so the node's {@code java.security} configuration decides (in
+     * FIPS mode OpenSearch puts {@value #FIPS_PROVIDER} first and removes SunJCE). The choice is pinned the first
+     * time, and every later call uses the same provider.
      */
     public static Cipher cipher(String transformation) throws GeneralSecurityException {
-        resolve(); // a FIPS build refuses to run on a node that is not in FIPS mode
-        return Cipher.getInstance(transformation);
+        return Cipher.getInstance(transformation, pinned(resolve(), "Cipher." + transformation, () -> Cipher.getInstance(transformation).getProvider()));
     }
 
-    /** Returns a JCE MAC for {@code algorithm} from the JVM's provider order; see {@link #cipher}. */
+    /** Returns a JCE MAC for {@code algorithm} from the provider pinned for it; see {@link #cipher}. */
     public static Mac mac(String algorithm) throws GeneralSecurityException {
-        resolve();
-        return Mac.getInstance(algorithm);
+        return Mac.getInstance(algorithm, pinned(resolve(), "Mac." + algorithm, () -> Mac.getInstance(algorithm).getProvider()));
+    }
+
+    private static Provider pinned(Resolved r, String key, Lookup lookup) throws GeneralSecurityException {
+        Provider p = r.pinned.get(key);
+        if (p == null) {
+            synchronized (r.pinned) {
+                p = r.pinned.get(key);
+                if (p == null) {
+                    p = lookup.provider();
+                    r.pinned.put(key, p);
+                }
+            }
+        }
+        return p;
     }
 
     /**
-     * The provider the JVM's order picks for AES-GCM, for logging and for components that only record it. Other
+     * The provider pinned for AES-GCM, for logging and for components that only record it. Other
      * algorithms may come from another provider; get them with {@link #cipher} and {@link #mac}.
      *
      * @throws IllegalStateException if this is a FIPS build and the node is not in FIPS mode, or no provider
@@ -103,7 +147,7 @@ public final class CryptoProviders {
 
     /**
      * Random source to pass when initializing a JCE seal cipher without an IV: a per-thread {@link SecureRandom}
-     * from the JVM's default order. In FIPS mode that is {@value #FIPS_PROVIDER}'s approved DRBG, and the cipher
+     * of the algorithm and provider the JVM's default order picked at startup. In FIPS mode that is {@value #FIPS_PROVIDER}'s approved DRBG, and the cipher
      * generates the IV inside its module from it. Not used when {@link #awsLc()} seals.
      */
     public static SecureRandom nonceRandom() {
@@ -143,9 +187,9 @@ public final class CryptoProviders {
         selfTestSealNonce(nonceRandom());
         String hmac;
         try {
-            hmac = mac("HmacSHA384").getProvider().getName();
+            hmac = mac(HMAC).getProvider().getName();
         } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("HmacSHA384 is not available", e);
+            throw new IllegalStateException(HMAC + " is not available", e);
         }
         if (r.awsLc != null) {
             r.awsLc.selfTest();
@@ -153,12 +197,13 @@ public final class CryptoProviders {
         LOGGER
             .info(
                 "storage encryption uses [{}] for AES-GCM, AES-CTR, key derivation and random numbers; JCE providers from the JVM's order: "
-                    + "AES-GCM [{}], AES-CTR [{}], HmacSHA384 [{}], SecureRandom [{}] (FIPS mode: {}, crypto.standard: {})",
+                    + "AES-GCM [{}], AES-CTR [{}], HmacSHA384 [{}], SecureRandom [{}/{}] (FIPS mode: {}, crypto.standard: {})",
                 r.awsLc != null ? r.awsLc.version() + " (" + r.awsLc.library() + ")" : "JCE",
                 gcm,
                 ctr,
                 hmac,
-                r.random.getProvider().getName(),
+                r.randomAlgorithm,
+                r.randomProvider.getName(),
                 r.fips,
                 isFipsBuild() ? FIPS_140_3 : "any-supported"
             );
@@ -172,21 +217,37 @@ public final class CryptoProviders {
                 if (r == null) {
                     boolean fips = isApprovedOnlyMode();
                     requireFipsModeForFipsBuild(isFipsBuild(), fips);
-                    Provider provider;
-                    try {
-                        provider = Cipher.getInstance("AES/GCM/NoPadding").getProvider();
-                    } catch (GeneralSecurityException e) {
-                        throw new IllegalStateException("no installed JCE provider offers AES/GCM/NoPadding", e);
-                    }
+                    // Pin what the JVM's order picks now, so a provider added later cannot change it.
+                    Map<String, Provider> pinned = new HashMap<>();
+                    pinned.put("Cipher." + GCM, lookup(GCM, () -> Cipher.getInstance(GCM).getProvider()));
+                    pinned.put("Cipher." + CTR, lookup(CTR, () -> Cipher.getInstance(CTR).getProvider()));
+                    pinned.put("Mac." + HMAC, lookup(HMAC, () -> Mac.getInstance(HMAC).getProvider()));
+                    SecureRandom jceRandom = new SecureRandom();
                     AwsLcFips awsLc = isFipsBuild() ? loadAwsLc() : null;
                     // With AWS-LC loaded, message IDs and translog nonces come from its DRBG, with no JCE fallback.
-                    SecureRandom random = awsLc != null ? awsLc.secureRandom() : new SecureRandom();
-                    r = new Resolved(provider, random, awsLc, fips);
+                    SecureRandom random = awsLc != null ? awsLc.secureRandom() : jceRandom;
+                    r = new Resolved(
+                        pinned.get("Cipher." + GCM),
+                        random,
+                        jceRandom.getAlgorithm(),
+                        jceRandom.getProvider(),
+                        awsLc,
+                        fips,
+                        pinned
+                    );
                     resolved = r;
                 }
             }
         }
         return r;
+    }
+
+    private static Provider lookup(String algorithm, Lookup lookup) {
+        try {
+            return lookup.provider();
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("no installed JCE provider offers " + algorithm, e);
+        }
     }
 
     /**
@@ -272,7 +333,7 @@ public final class CryptoProviders {
     static String selfTestCtr() {
         String name = "?";
         try {
-            Cipher cipher = cipher("AES/CTR/NoPadding");
+            Cipher cipher = cipher(CTR);
             name = cipher.getProvider().getName();
             cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(CTR_KAT_KEY, "AES"), new IvParameterSpec(CTR_KAT_IV));
             if (MessageDigest.isEqual(CTR_KAT_EXPECTED, cipher.doFinal(CTR_KAT_PLAINTEXT)) == false) {
@@ -292,7 +353,7 @@ public final class CryptoProviders {
         String name = "?";
         try {
             SecretKeySpec key = new SecretKeySpec(new byte[32], "AES");
-            Cipher seal = cipher("AES/GCM/NoPadding");
+            Cipher seal = cipher(GCM);
             name = seal.getProvider().getName();
             seal.init(Cipher.ENCRYPT_MODE, key, random);
             byte[] nonce = seal.getIV();
@@ -301,7 +362,7 @@ public final class CryptoProviders {
             }
             seal.updateAAD(new byte[8]);
             byte[] sealed = seal.doFinal(new byte[16]);
-            Cipher open = cipher("AES/GCM/NoPadding");
+            Cipher open = cipher(GCM);
             open.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, nonce));
             open.updateAAD(new byte[8]);
             if (MessageDigest.isEqual(new byte[16], open.doFinal(sealed)) == false) {
@@ -316,7 +377,7 @@ public final class CryptoProviders {
     static String selfTest() {
         String name = "?";
         try {
-            Cipher cipher = cipher("AES/GCM/NoPadding");
+            Cipher cipher = cipher(GCM);
             name = cipher.getProvider().getName();
             SecretKeySpec key = new SecretKeySpec(new byte[32], "AES");
             cipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(128, new byte[12]));

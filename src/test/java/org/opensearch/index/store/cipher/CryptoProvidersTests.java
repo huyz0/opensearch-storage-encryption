@@ -4,11 +4,16 @@
  */
 package org.opensearch.index.store.cipher;
 
+import java.security.Key;
+import java.security.Provider;
 import java.security.SecureRandom;
 import java.security.Security;
+import java.security.spec.AlgorithmParameterSpec;
 import java.util.Arrays;
 
 import javax.crypto.Cipher;
+import javax.crypto.Mac;
+import javax.crypto.MacSpi;
 
 import org.opensearch.test.OpenSearchTestCase;
 
@@ -38,6 +43,50 @@ public class CryptoProvidersTests extends OpenSearchTestCase {
         assertEquals(Cipher.getInstance("AES/CTR/NoPadding").getProvider(), CryptoProviders.cipher("AES/CTR/NoPadding").getProvider());
         assertEquals(Cipher.getInstance("AES/GCM/NoPadding").getProvider(), CryptoProviders.provider());
         assertEquals(Security.getProviders()[0].getName().equals(CryptoProviders.FIPS_PROVIDER), CryptoProviders.isFipsMode());
+    }
+
+    /** A provider added to the front of the JVM's order after startup does not change what the plugin uses. */
+    public void testProvidersArePinnedAtStartup() throws Exception {
+        Provider before = CryptoProviders.mac(CryptoProviders.HMAC).getProvider();
+        Provider beforeRandom = CryptoProviders.nonceRandom().getProvider();
+        Provider shadow = new Provider("ShadowForTest", "1.0", "test provider") {
+            {
+                put("Mac." + CryptoProviders.HMAC, ShadowMac.class.getName());
+            }
+        };
+        assertEquals(1, Security.insertProviderAt(shadow, 1));
+        try {
+            assertSame(shadow, Mac.getInstance(CryptoProviders.HMAC).getProvider());
+            assertSame(before, CryptoProviders.mac(CryptoProviders.HMAC).getProvider());
+            assertSame(beforeRandom, CryptoProviders.nonceRandom().getProvider());
+        } finally {
+            Security.removeProvider(shadow.getName());
+        }
+    }
+
+    /** A MAC that only exists to sit first in the provider order. */
+    public static final class ShadowMac extends MacSpi {
+        @Override
+        protected int engineGetMacLength() {
+            return 48;
+        }
+
+        @Override
+        protected void engineInit(Key key, AlgorithmParameterSpec params) {}
+
+        @Override
+        protected void engineUpdate(byte input) {}
+
+        @Override
+        protected void engineUpdate(byte[] input, int offset, int len) {}
+
+        @Override
+        protected byte[] engineDoFinal() {
+            return new byte[48];
+        }
+
+        @Override
+        protected void engineReset() {}
     }
 
     /** In a FIPS build every test JVM runs approved-only, so this checks the build wiring end to end. */

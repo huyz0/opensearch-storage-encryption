@@ -151,11 +151,12 @@ DRBG, with no JCE fallback). It has native code for both x86_64 and aarch64. Onl
 start; the default build, which bundles no native code, uses `BCFIPS` for everything in FIPS mode. The default build bundles no native code
 and gets every algorithm from the JVM's provider order, as OpenSearch core does: no provider is named, so the
 node's `java.security` decides. That is normally the JDK's `SunJCE`, and `BCFIPS` in FIPS mode, where OpenSearch
-puts it first and removes `SunJCE`. If core or an operator changes the order, the plugin follows. The node log says
+puts it first and removes `SunJCE`. If core or an operator changes the order, the plugin follows at the next node start: the choice for each
+algorithm is pinned at startup, so a provider added while the node runs changes nothing. The node log says
 what is in use:
 
 ```
-storage encryption uses [AWS-LC FIPS 3.0.0 (.../plugins/storage-encryption/native/linux-x86_64/libawslc-fips-crypto.so)] for AES-GCM, AES-CTR, key derivation and random numbers; JCE providers from the JVM's order: AES-GCM [BCFIPS], AES-CTR [BCFIPS], HmacSHA384 [BCFIPS], SecureRandom [BCFIPS] (FIPS mode: true, crypto.standard: FIPS-140-3)
+storage encryption uses [AWS-LC FIPS 3.0.0 (.../plugins/storage-encryption/native/linux-x86_64/libawslc-fips-crypto.so)] for AES-GCM, AES-CTR, key derivation and random numbers; JCE providers from the JVM's order: AES-GCM [BCFIPS], AES-CTR [BCFIPS], HmacSHA384 [BCFIPS], SecureRandom [DEFAULT/BCFIPS] (FIPS mode: true, crypto.standard: FIPS-140-3)
 ```
 
 In FIPS mode the default build relies on the first provider generating GCM nonces inside its own module, as
