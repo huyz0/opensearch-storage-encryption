@@ -133,6 +133,27 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
         }
     }
 
+    /**
+     * Renames through the NIO directory, which moves the file and drops its cached footer and key,
+     * after dropping what the buffer pool cached under either name: its caches are keyed by path, so
+     * blocks and channels cached under a temporary recovery or replication name would otherwise stay.
+     */
+    @Override
+    public void rename(String source, String dest) throws IOException {
+        if (delegeteBufferPool(FileSwitchDirectory.getExtension(source))) {
+            bufferPoolDirectory.dropCachedFile(source);
+        }
+        boolean destInBufferPool = delegeteBufferPool(FileSwitchDirectory.getExtension(dest));
+        if (destInBufferPool) {
+            bufferPoolDirectory.dropCachedFile(dest);
+        }
+        super.rename(source, dest);
+        if (destInBufferPool) {
+            // A reader of the old dest can re-cache its blocks or channel during the move.
+            bufferPoolDirectory.dropCachedFile(dest);
+        }
+    }
+
     @Override
     public void close() throws IOException {
         bufferPoolDirectory.close(); // only closes its resources.

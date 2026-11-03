@@ -6,12 +6,14 @@ package org.opensearch.index.store.hybrid;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -267,6 +269,44 @@ public class HybridCryptoDirectoryTests {
             IndexOutput output = hybridDir.createOutput("test.xyz", IOContext.DEFAULT);
             assertEquals(mockOutput, output);
             verify(bufferPoolDirectory).createOutput(eq("test.xyz"), any(IOContext.class));
+        }
+    }
+
+    @Test
+    public void testRenameDropsCachedMetadataAndBufferPoolEntries() throws Exception {
+        try (
+            HybridCryptoDirectory hybridDir = new HybridCryptoDirectory(
+                lockFactory,
+                bufferPoolDirectory,
+                provider,
+                keyResolver,
+                encryptionMetadataCache,
+                nioExtensions
+            )
+        ) {
+            // A recovery-style temp name with an NIO extension, so the real NIO directory writes it
+            String temp = "recovery.abc._0.fdt";
+            try (IndexOutput out = hybridDir.createOutput(temp, IOContext.DEFAULT)) {
+                out.writeBytes(new byte[100], 100);
+            }
+            String tempPath = EncryptionMetadataCache.normalizePath(hybridDir.getDirectory().resolve(temp));
+            String destPath = EncryptionMetadataCache.normalizePath(hybridDir.getDirectory().resolve("_0.fdt"));
+            assertNotNull("closing the output caches the footer", encryptionMetadataCache.getFooter(tempPath));
+
+            hybridDir.rename(temp, "_0.fdt");
+
+            assertNull(encryptionMetadataCache.getFooter(tempPath));
+            assertEquals(100, hybridDir.fileLength("_0.fdt"));
+            hybridDir.deleteFile("_0.fdt");
+            assertNull(encryptionMetadataCache.getFooter(destPath));
+            verify(bufferPoolDirectory, never()).dropCachedFile(any());
+
+            // Buffer-pool extensions also drop the buffer pool's blocks and channel under both names
+            Files.write(tempDir.resolve("recovery.abc._1.tim"), new byte[] { 1 });
+            hybridDir.rename("recovery.abc._1.tim", "_1.tim");
+            verify(bufferPoolDirectory).dropCachedFile("recovery.abc._1.tim");
+            // before the move, and again after it in case a reader of the old file re-cached it meanwhile
+            verify(bufferPoolDirectory, times(2)).dropCachedFile("_1.tim");
         }
     }
 }

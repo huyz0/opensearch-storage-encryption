@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.security.Provider;
@@ -232,7 +233,40 @@ public class BufferPoolDirectory extends FSDirectory {
     @Override
     public void deleteFile(String name) throws IOException {
         Path file = dirPath.resolve(name);
+        dropCachedBlocks(file);
+        super.deleteFile(name);
+        dropCachedMetadataAndChannel(file);
+    }
 
+    /**
+     * Renames a file and drops what the caches hold under both names. Peer recovery and segment
+     * replication write every file under a temporary name and rename it, so without this the
+     * footer and file key cached under each temporary name would stay until the shard closes.
+     */
+    @Override
+    public void rename(String source, String dest) throws IOException {
+        dropCachedFile(source);
+        dropCachedFile(dest);
+        super.rename(source, dest);
+        // A reader of the old dest (or of source) can repopulate the caches while the move runs, so drop
+        // again afterwards. Blocks under dest would otherwise be served to readers of the new file.
+        dropCachedMetadataAndChannel(dirPath.resolve(source));
+        dropCachedFile(dest);
+    }
+
+    /**
+     * Drops the read-ahead requests, cached blocks, footer, file key and cached channel of {@code name}.
+     * Used before a file is renamed, since the caches are keyed by path.
+     *
+     * @param name the file name in this directory
+     */
+    public void dropCachedFile(String name) {
+        Path file = dirPath.resolve(name);
+        dropCachedBlocks(file);
+        dropCachedMetadataAndChannel(file);
+    }
+
+    private void dropCachedBlocks(Path file) {
         // Cancel any pending async read-ahead operations for this file FIRST
         // to prevent race where read-ahead tries to load blocks from deleted/replaced file
         readAheadworker.cancel(file);
@@ -248,15 +282,18 @@ public class BufferPoolDirectory extends FSDirectory {
                         blockCache.invalidate(key);
                     }
                 }
+            } catch (NoSuchFileException e) {
+                // Nothing on disk, so nothing was cached from it
             } catch (IOException e) {
-                // Fall back to path-based invalidation if file size unavailable
                 LOGGER.warn("Failed to get file size for clearing cache for deleting shard", e);
             }
         }
-        super.deleteFile(name);
+    }
+
+    private void dropCachedMetadataAndChannel(Path file) {
         encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(file));
 
-        // Invalidate the FD cache entry for the deleted file
+        // Invalidate the FD cache entry for the file
         if (fileChannelCache != null) {
             fileChannelCache.invalidate(file.toAbsolutePath().normalize().toString());
         }
