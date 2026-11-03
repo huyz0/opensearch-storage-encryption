@@ -66,7 +66,7 @@ public class CryptoChannelFactory implements ChannelFactory {
         // plaintext and gets encrypted under this node's key before it is read.
         if (optionSet.contains(StandardOpenOption.WRITE) == false
             && CryptoFileChannelWrapper.encryptIfPlaintext(path, keyResolver, translogUUID)) {
-            logger.info("Encrypted plaintext translog file {} (downloaded from the remote store)", path.getFileName());
+            logger.debug("Encrypted plaintext translog file {} (downloaded from the remote store)", path.getFileName());
         }
 
         FileChannel baseChannel = FileChannel.open(path, options);

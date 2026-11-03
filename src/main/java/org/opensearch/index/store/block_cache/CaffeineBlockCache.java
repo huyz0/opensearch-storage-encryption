@@ -19,6 +19,7 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.index.store.metrics.LogThrottle;
 
 import com.github.benmanes.caffeine.cache.Cache;
 
@@ -38,6 +39,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 @SuppressForbidden(reason = "uses custom DirectIO")
 public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
     private static final Logger LOGGER = LogManager.getLogger(CaffeineBlockCache.class);
+    private static final LogThrottle POOL_EXHAUSTED_LOG = new LogThrottle(1, TimeUnit.MINUTES);
 
     private final Cache<BlockCacheKey, BlockCacheValue<T>> cache;
     private final BlockLoader<V> blockLoader;
@@ -123,7 +125,10 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
                 throw new InterruptedIOException("Interrupted while waiting for pool space to load " + key);
             }
             if (!reserved) {
-                LOGGER.warn("Gave up loading {}: segment pool exhausted", key);
+                long suppressed = POOL_EXHAUSTED_LOG.tryAcquire();
+                if (suppressed >= 0) {
+                    LOGGER.warn("Gave up loading {}: segment pool exhausted ({} similar messages suppressed)", key, suppressed);
+                }
                 throw new BlockLoader.PoolAcquireFailedException("Segment pool exhausted; gave up loading " + key);
             }
         }
