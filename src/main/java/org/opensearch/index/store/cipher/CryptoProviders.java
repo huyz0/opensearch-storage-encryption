@@ -96,7 +96,10 @@ public final class CryptoProviders {
         return r.fips ? r.fipsNonceRandom : NONCE_RANDOM.get();
     }
 
-    /** Returns a shared random source from the chosen provider, for message IDs and translog nonces. */
+    /**
+     * Returns a shared random source for message IDs and translog nonces: the AWS-LC FIPS module's DRBG when
+     * {@link #awsLc()} is loaded, otherwise one from the chosen provider.
+     */
     public static SecureRandom secureRandom() {
         return resolve().random;
     }
@@ -127,7 +130,7 @@ public final class CryptoProviders {
         }
         LOGGER
             .info(
-                "storage encryption uses [{}] for AES-GCM, AES-CTR and key derivation, JCE provider [{}] (FIPS mode: {}, crypto.standard: {})",
+                "storage encryption uses [{}] for AES-GCM, AES-CTR, key derivation and random numbers, JCE provider [{}] (FIPS mode: {}, crypto.standard: {})",
                 r.awsLc != null ? r.awsLc.version() + " (" + r.awsLc.library() + ")" : r.provider.getName(),
                 r.provider.getName(),
                 r.fips,
@@ -143,9 +146,10 @@ public final class CryptoProviders {
                 if (r == null) {
                     boolean fips = isApprovedOnlyMode();
                     Provider provider = choose(isFipsBuild(), fips, Security::getProvider);
-                    SecureRandom random = newSecureRandom(provider, fips);
                     // choose() has already refused a FIPS build on a node that is not in FIPS mode.
                     AwsLcFips awsLc = isFipsBuild() ? loadAwsLc() : null;
+                    // With AWS-LC loaded, message IDs and translog nonces come from its DRBG, with no JCE fallback.
+                    SecureRandom random = awsLc != null ? awsLc.secureRandom() : newSecureRandom(provider, fips);
                     r = new Resolved(provider, random, fips ? newSecureRandom(provider, true) : null, awsLc, fips);
                     resolved = r;
                 }

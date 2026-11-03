@@ -146,13 +146,13 @@ On an OpenSearch node running in FIPS mode (`OPENSEARCH_FIPS_MODE=true` on a FIP
 Bouncy Castle FIPS in approved-only mode), the plugin uses only FIPS 140-3 validated modules. The FIPS build
 bundles the AWS-LC FIPS 3.0.0 module (`libcrypto` built from AWS-LC's validated `AWS-LC-FIPS-3.0.0` release by
 `scripts/build-aws-lc-fips.sh`) and calls it directly through Java's Foreign Function and Memory API for AES-GCM,
-AES-CTR (translog) and key derivation. It has native code for both x86_64 and aarch64. Everything else (random
-message IDs, self-tests) uses `BCFIPS`. If AWS-LC fails to load or fails its self-tests, the plugin refuses to
+AES-CTR (translog), key derivation and random numbers (message IDs and translog nonces come from the module's
+DRBG, with no JCE fallback). It has native code for both x86_64 and aarch64. Only the JCE self-tests use `BCFIPS`. If AWS-LC fails to load or fails its self-tests, the plugin refuses to
 start; the default build, which bundles no native code, uses `BCFIPS` for everything in FIPS mode. Outside FIPS mode the plugin uses the JDK's
 built-in `SunJCE` and loads no native crypto. The node log says what is in use:
 
 ```
-storage encryption uses [AWS-LC FIPS 3.0.0 (.../plugins/storage-encryption/native/linux-x86_64/libawslc-fips-crypto.so)] for AES-GCM, AES-CTR and key derivation, JCE provider [BCFIPS] (FIPS mode: true, crypto.standard: FIPS-140-3)
+storage encryption uses [AWS-LC FIPS 3.0.0 (.../plugins/storage-encryption/native/linux-x86_64/libawslc-fips-crypto.so)] for AES-GCM, AES-CTR, key derivation and random numbers, JCE provider [BCFIPS] (FIPS mode: true, crypto.standard: FIPS-140-3)
 ```
 
 To get a plugin that only runs in FIPS mode, build it with OpenSearch's own FIPS build parameter:
