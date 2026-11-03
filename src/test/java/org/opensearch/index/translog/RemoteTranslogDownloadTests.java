@@ -94,6 +94,12 @@ public class RemoteTranslogDownloadTests extends OpenSearchTestCase {
         }
     }
 
+    /** On-disk length of {@code length} data bytes converted in one pass: format header plus full 8 KiB frames and a last one. */
+    private static long encryptedDataLength(int length) {
+        long frames = (length + TranslogChunkManager.DEFAULT_MAX_FRAME_SIZE - 1) / TranslogChunkManager.DEFAULT_MAX_FRAME_SIZE;
+        return TranslogChunkManager.FORMAT_HEADER_SIZE + length + frames * TranslogChunkManager.FRAME_OVERHEAD;
+    }
+
     private static byte[] readData(FileChannel channel, int length) throws IOException {
         ByteBuffer buf = ByteBuffer.allocate(length);
         while (buf.hasRemaining()) {
@@ -121,12 +127,12 @@ public class RemoteTranslogDownloadTests extends OpenSearchTestCase {
         }
 
         byte[] onDisk = Files.readAllBytes(downloaded);
-        assertEquals("the file is in the encrypted format", uploaded.length + CryptoFileChannelWrapper.PREFIX_LENGTH, onDisk.length);
+        assertEquals("the file is in the encrypted format", headerSize() + encryptedDataLength(data.length), onDisk.length);
         assertArrayEquals("header stays plaintext", Arrays.copyOf(uploaded, headerSize()), Arrays.copyOf(onDisk, headerSize()));
-        assertEquals(CryptoFileChannelWrapper.MAGIC, ByteBuffer.wrap(onDisk, headerSize(), Integer.BYTES).getInt());
+        assertEquals(TranslogChunkManager.FORMAT_MAGIC, ByteBuffer.wrap(onDisk, headerSize(), Integer.BYTES).getInt());
         assertFalse(
             "data is no longer plaintext",
-            Arrays.equals(data, Arrays.copyOfRange(onDisk, headerSize() + CryptoFileChannelWrapper.PREFIX_LENGTH, onDisk.length))
+            Arrays.equals(data, Arrays.copyOfRange(onDisk, headerSize(), headerSize() + data.length))
         );
         assertFalse(Files.exists(downloaded.resolveSibling("translog-3.tlog.encrypting")));
 
@@ -194,10 +200,9 @@ public class RemoteTranslogDownloadTests extends OpenSearchTestCase {
 
         assertFalse(CryptoFileChannelWrapper.encryptIfPlaintext(damaged, keyResolver, UUID));
         assertArrayEquals(uploaded, Files.readAllBytes(damaged));
-        try (FileChannel channel = new CryptoChannelFactory(keyResolver, UUID).open(damaged, StandardOpenOption.READ)) {
-            IOException e = expectThrows(IOException.class, () -> channel.read(ByteBuffer.allocate(16), headerSize()));
-            assertTrue(e.getMessage(), e.getMessage().contains("Unsupported translog encryption format"));
-        }
+        CryptoChannelFactory factory = new CryptoChannelFactory(keyResolver, UUID);
+        IOException e = expectThrows(IOException.class, () -> factory.open(damaged, StandardOpenOption.READ));
+        assertTrue(e.getMessage(), e.getMessage().contains("Unsupported translog encryption format"));
         assertArrayEquals(uploaded, Files.readAllBytes(damaged));
     }
 
@@ -290,7 +295,7 @@ public class RemoteTranslogDownloadTests extends OpenSearchTestCase {
                 if (onDisk.length > headerSize) {
                     assertEquals(
                         file.toString(),
-                        CryptoFileChannelWrapper.MAGIC,
+                        TranslogChunkManager.FORMAT_MAGIC,
                         ByteBuffer.wrap(onDisk, headerSize, Integer.BYTES).getInt()
                     );
                 }
@@ -333,7 +338,7 @@ public class RemoteTranslogDownloadTests extends OpenSearchTestCase {
             failures.stream().skip(1).forEach(error::addSuppressed);
             throw error;
         }
-        assertEquals(headerSize() + CryptoFileChannelWrapper.PREFIX_LENGTH + data.length, Files.size(downloaded));
+        assertEquals(headerSize() + encryptedDataLength(data.length), Files.size(downloaded));
         assertFalse(Files.exists(downloaded.resolveSibling("translog-4.tlog.encrypting")));
     }
 }

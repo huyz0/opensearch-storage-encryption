@@ -18,8 +18,8 @@ import org.opensearch.index.store.key.KeyResolver;
  * This class extends LocalTranslog and injects a CryptoChannelFactory during construction
  * to ensure that all translog file operations go through encrypted channels.
  *
- * Translog files (.tlog) are encrypted with offset-keyed AES-CTR and a random nonce per
- * file; see {@link CryptoFileChannelWrapper} for the format.
+ * Translog files (.tlog) are encrypted as sealed AES-256-GCM frames under a per-file key;
+ * see {@link TranslogChunkManager} for the format.
  * Checkpoint files (.ckp) remain unencrypted for performance and compatibility.
  *
  * Uses unified KeyResolver (same as index files) for consistent
