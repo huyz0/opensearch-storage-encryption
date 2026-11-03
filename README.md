@@ -288,6 +288,37 @@ node.store.crypto.key_refresh_interval: 1h
 node.store.crypto.key_expiry_interval: 24h
 ```
 
+## Monitoring
+
+### Metrics
+
+The plugin reports metrics through OpenSearch's telemetry framework (enable a metrics exporter such as `telemetry-otel` to collect them). Every metric is per node.
+
+| Metric | Type | Tags | What it shows |
+| --- | --- | --- | --- |
+| `crypto.error.total` | counter | `error_type` | Errors by type: `kms_key_error`, `kms_index_blocked`, `auth_failure`, `pool_exhausted`, `readahead_failure`, `index_input_error`, `index_output_error`, `directory_creation_error`, and segment refcount errors |
+| `crypto.index.error.total` | counter | `error_type`, `index_name` | The same count for errors that affect one index (`kms_key_error`, `kms_index_blocked`), so you can see which index |
+| `crypto.kms.blocked_indices` | gauge | none | Indices this node's key health monitor has blocked because their master key can't be loaded |
+| `crypto.pool.segments.max`, `.allocated`, `.free` | gauge | none | Shared segment pool capacity, segments allocated, and allocated segments not in use |
+| `crypto.cache.blocks` | gauge | none | Blocks in the shared block cache |
+| `crypto.cache.hits`, `.misses`, `.evictions` | gauge | none | Running totals since the node started; graph their rate |
+| `crypto.fd_cache.open` | gauge | none | Open file channels in the shared cache |
+| `crypto.fd_cache.hits`, `.misses`, `.evictions` | gauge | none | Running totals since the node started; graph their rate |
+
+`crypto.index.error.total` has one series per affected index. If your metrics backend bills or limits by series count, drop `crypto.index.*` in your collector; `crypto.error.total` and the WARN log carry the same events at node level.
+
+Worth alerting on: any `auth_failure` (corruption, tampering or a wrong key), `crypto.kms.blocked_indices` above 0, and a sustained rate of `pool_exhausted`.
+
+### Logs
+
+The plugin never logs key material, IVs, file contents or KMS encryption context values. At the default level it logs startup configuration (crypto provider, FIPS mode, pool and cache sizes) and these warnings:
+
+- `Can't load the master key for index [...]`: the first key provider failure of an episode, with what happens next and the root cause. It is logged again if the episode turns critical, and `Master key for index [...] loads again` is logged at INFO on recovery.
+- `Applied write|read block to index ...`: the key health monitor blocked the index.
+- `segment pool exhausted`, `Large readahead request`, `Readahead failed`: at most one per minute each, with a count of suppressed repeats.
+
+Per-shard and per-block detail is at DEBUG (`logger.org.opensearch.index.store: debug`).
+
 ## Security Considerations
 
 ### Data Protection

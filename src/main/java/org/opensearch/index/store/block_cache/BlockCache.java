@@ -113,11 +113,6 @@ public interface BlockCache<T> {
     String cacheStats();
 
     /**
-     * record cache stats
-     */
-    void recordStats();
-
-    /**
      * Returns the cache hit rate as a value between 0.0 and 1.0.
      *
      * @return hit rate (hits / (hits + misses))

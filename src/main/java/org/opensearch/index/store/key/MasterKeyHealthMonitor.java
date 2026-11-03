@@ -121,6 +121,9 @@ public class MasterKeyHealthMonitor {
         volatile boolean readBlockScheduled = false;
         // Set once the first failure of this episode has been logged; a recovery drops the state
         final AtomicBoolean failureLogged = new AtomicBoolean();
+        // Set once a critical failure of this episode has been logged, so an episode that starts transient
+        // and turns critical still says why the index is blocked
+        final AtomicBoolean criticalLogged = new AtomicBoolean();
 
         FailureState(Exception exception, FailureType failureType) {
             this.lastFailureTimeMillis = new AtomicLong(System.currentTimeMillis());
@@ -167,6 +170,26 @@ public class MasterKeyHealthMonitor {
             throw new IllegalStateException("MasterKeyHealthMonitor not initialized.");
         }
         return INSTANCE;
+    }
+
+    /**
+     * Number of indices this node's monitor has blocked (or is blocking) because their master key can't be
+     * loaded. Each node counts the indices it tracks, so one index can be counted on several nodes.
+     *
+     * @return the count, or 0 if the monitor is not initialized
+     */
+    public static int blockedIndexCount() {
+        MasterKeyHealthMonitor monitor = INSTANCE;
+        if (monitor == null) {
+            return 0;
+        }
+        int count = 0;
+        for (FailureState state : monitor.failureTracker.values()) {
+            if (state.blocksApplied) {
+                count++;
+            }
+        }
+        return count;
     }
 
     /**
@@ -247,10 +270,13 @@ public class MasterKeyHealthMonitor {
 
     /**
      * Logs the first failure of an episode at WARN, so an operator can see why an index is (or will be)
-     * blocked. Later failures in the same episode are not logged again; a recovery ends the episode.
+     * blocked, and logs again the first time the episode turns critical. Other failures in the same episode
+     * are not logged; a recovery ends the episode.
      */
     private void logFirstFailure(String indexName, FailureState state, Exception e, FailureType failureType, boolean keyInCache) {
-        if (state.failureLogged.compareAndSet(false, true) == false) {
+        boolean first = state.failureLogged.compareAndSet(false, true);
+        boolean firstCritical = failureType == FailureType.CRITICAL && state.criticalLogged.compareAndSet(false, true);
+        if (first == false && firstCritical == false) {
             return;
         }
         String impact;

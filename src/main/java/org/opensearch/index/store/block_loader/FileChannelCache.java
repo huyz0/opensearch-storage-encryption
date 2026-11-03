@@ -13,11 +13,10 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.concurrent.TimeUnit;
 
-import org.opensearch.index.store.metrics.CryptoMetricsService;
-
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
+import com.github.benmanes.caffeine.cache.stats.CacheStats;
 
 /**
  * Node-level cache of {@link FileChannel} instances, bounded by max open FDs
@@ -193,23 +192,10 @@ public class FileChannelCache implements Closeable {
     }
 
     /**
-     * Publish FD cache statistics to the metrics service.
+     * @return the cache's hit, miss and eviction counts since it was created
      */
-    public void recordStats() {
-        var stats = fdCache.stats();
-        try {
-            CryptoMetricsService
-                .getInstance()
-                .recordFdCacheStats(
-                    fdCache.estimatedSize(),
-                    stats.hitCount(),
-                    stats.missCount(),
-                    stats.hitRate() * 100,
-                    stats.evictionCount()
-                );
-        } catch (IllegalStateException e) {
-            // Metrics not initialized yet — skip
-        }
+    public CacheStats stats() {
+        return fdCache.stats();
     }
 
     private RefCountedChannel openChannel(String path) {

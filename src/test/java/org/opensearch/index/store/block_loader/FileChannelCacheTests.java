@@ -33,7 +33,7 @@ import com.github.benmanes.caffeine.cache.RemovalCause;
  *   <li>Node setting defaults and overrides for max file channels and expire-after-access</li>
  *   <li>3-arg constructor with expiry enabled</li>
  *   <li>Time-based expiry behavior</li>
- *   <li>Metrics recording via {@link FileChannelCache#recordStats()}</li>
+ *   <li>Hit and miss counts via {@link FileChannelCache#stats()}</li>
  *   <li>Size-based eviction combined with time-based expiry</li>
  * </ul>
  */
@@ -371,10 +371,9 @@ public class FileChannelCacheTests extends OpenSearchTestCase {
     // ====================================================================
 
     /**
-     * recordStats() does not throw when CryptoMetricsService is not initialized.
-     * The method catches IllegalStateException internally.
+     * stats() counts the first acquire as a miss and the second as a hit.
      */
-    public void testRecordStatsWithoutMetricsServiceDoesNotThrow() throws Exception {
+    public void testStatsCountHitsAndMisses() throws Exception {
         Path file = createTestFile();
         String path = file.toAbsolutePath().normalize().toString();
 
@@ -389,8 +388,8 @@ public class FileChannelCacheTests extends OpenSearchTestCase {
             assertTrue(readAndValidate(ref.channel(), MAGIC));
         }
 
-        // Should not throw even without CryptoMetricsService initialized
-        cache.recordStats();
+        assertEquals(1, cache.stats().missCount());
+        assertEquals(1, cache.stats().hitCount());
 
         cache.close();
     }

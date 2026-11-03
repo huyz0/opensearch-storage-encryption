@@ -4,6 +4,8 @@
  */
 package org.opensearch.index.store;
 
+import java.io.Closeable;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collection;
@@ -85,6 +87,7 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
 
     // Static storage for remote store parameters (accessible by CryptoEngineFactory)
     private static Supplier<RepositoriesService> repositoriesServiceSupplier;
+    private Closeable blockedIndicesGauge;
     private static RemoteStoreSettings remoteStoreSettings;
 
     /**
@@ -233,6 +236,14 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
         // This prevents allocation on dedicated master nodes which never create shards
         CryptoDirectoryFactory.setNodeSettings(environment.settings());
         CryptoMetricsService.initialize(metricsRegistry);
+        blockedIndicesGauge = CryptoMetricsService
+            .getInstance()
+            .registerGauge(
+                "crypto.kms.blocked_indices",
+                "Indices this node's key health monitor has blocked because their master key can't be loaded",
+                "count",
+                () -> (double) MasterKeyHealthMonitor.blockedIndexCount()
+            );
 
         return Collections.emptyList();
     }
@@ -244,6 +255,14 @@ public class CryptoDirectoryPlugin extends Plugin implements IndexStorePlugin, E
             return;
         }
 
+        if (blockedIndicesGauge != null) {
+            try {
+                blockedIndicesGauge.close();
+            } catch (IOException e) {
+                log.debug("Failed to unregister the blocked indices gauge", e);
+            }
+            blockedIndicesGauge = null;
+        }
         MasterKeyHealthMonitor.shutdown();
         // Close shared pool resources if they were initialized
         // the shared pool is initialized only when at least one index
