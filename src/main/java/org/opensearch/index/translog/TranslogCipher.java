@@ -5,6 +5,7 @@
 package org.opensearch.index.translog;
 
 import java.io.IOException;
+import java.lang.foreign.MemorySegment;
 import java.security.GeneralSecurityException;
 import java.security.Key;
 
@@ -12,6 +13,7 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
+import org.opensearch.index.store.cipher.AwsLcFips;
 import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.key.KeyDerivation;
 
@@ -45,7 +47,7 @@ final class TranslogCipher {
 
     private static final ThreadLocal<Cipher> CTR = ThreadLocal.withInitial(() -> {
         try {
-            return Cipher.getInstance("AES/CTR/NoPadding", CryptoProviders.ctrProvider());
+            return Cipher.getInstance("AES/CTR/NoPadding", CryptoProviders.provider());
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("AES/CTR/NoPadding is not available", e);
         }
@@ -73,6 +75,17 @@ final class TranslogCipher {
      */
     void apply(byte[] buf, int off, int len, long dataOffset) throws IOException {
         if (len == 0) {
+            return;
+        }
+        AwsLcFips awsLc = CryptoProviders.awsLc();
+        if (awsLc != null) {
+            // FIPS mode: AES-CTR in the AWS-LC FIPS module.
+            try {
+                byte[] counter = counterBlock(nonce, dataOffset / AES_BLOCK);
+                awsLc.ctr(key, counter, (int) (dataOffset % AES_BLOCK), MemorySegment.ofArray(buf).asSlice(off, len));
+            } catch (GeneralSecurityException e) {
+                throw new IOException("Failed to apply translog cipher at data offset " + dataOffset, e);
+            }
             return;
         }
         Cipher cipher = CTR.get();

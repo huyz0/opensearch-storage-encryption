@@ -308,17 +308,27 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Download AWS-LC FIPS
+      - name: Download AWS-LC FIPS (x86_64)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: aws-lc-fips-linux-x86_64
-          path: aws-lc-fips
+          path: aws-lc-fips/linux-x86_64
+
+      - name: Download AWS-LC FIPS (aarch64)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: aws-lc-fips-linux-aarch64
+          path: aws-lc-fips/linux-aarch64
 
       - name: Switch to ci-runner user and run tests in FIPS mode
         run: |
           chown -R ci-runner:ci-runner $GITHUB_WORKSPACE
           chmod +x $GITHUB_WORKSPACE/gradlew
-          su ci-runner -c "export JAVA_HOME=$JAVA_HOME && export GRADLE_OPTS='$GRADLE_OPTS' && cd $GITHUB_WORKSPACE && ./gradlew test internalClusterTest yamlRestTest -x jcstress -Pcrypto.standard=FIPS-140-3 -Paws_lc.library=$GITHUB_WORKSPACE/aws-lc-fips/libawslc-fips-crypto.so -Dbuild.snapshot=false"
+          su ci-runner -c "export JAVA_HOME=$JAVA_HOME && export GRADLE_OPTS='$GRADLE_OPTS' && cd $GITHUB_WORKSPACE && ./gradlew test internalClusterTest yamlRestTest -x jcstress -Pcrypto.standard=FIPS-140-3 -Paws_lc.libraries=$GITHUB_WORKSPACE/aws-lc-fips -Dbuild.snapshot=false"
+
+      - name: Check the FIPS zip bundles AWS-LC for both architectures
+        run: |
+          "$JAVA_HOME/bin/jar" tf build/distributions/storage-encryption-fips.zip | tee /dev/stderr | grep -c '^native/linux-.*/libawslc-fips-crypto.so$' | grep -qx 2
 
       - name: Upload test reports
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
