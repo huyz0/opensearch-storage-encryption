@@ -19,6 +19,7 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.block_loader.BlockLoader;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.index.store.metrics.ErrorType;
 
 import com.github.benmanes.caffeine.cache.Cache;
 
@@ -123,6 +124,7 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
                 throw new InterruptedIOException("Interrupted while waiting for pool space to load " + key);
             }
             if (!reserved) {
+                CryptoMetricsService.count(ErrorType.POOL_EXHAUSTED);
                 LOGGER.warn("Gave up loading {}: segment pool exhausted", key);
                 throw new BlockLoader.PoolAcquireFailedException("Segment pool exhausted; gave up loading " + key);
             }

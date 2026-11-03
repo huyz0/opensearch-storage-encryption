@@ -20,6 +20,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.index.store.metrics.ErrorType;
 import org.opensearch.index.store.read_ahead.Worker;
 
 /**
@@ -361,6 +363,7 @@ public final class QueuingWorker implements Worker {
             LOGGER.debug("File not found during readahead path={}", task.path);
         } catch (IOException | UncheckedIOException e) {
             inFlight.remove(task);
+            CryptoMetricsService.count(ErrorType.READAHEAD_FAILURE);
             LOGGER.warn("Readahead failed path={} msg={}", task.path, e.getMessage(), e);
         } catch (RuntimeException e) {
             inFlight.remove(task);
