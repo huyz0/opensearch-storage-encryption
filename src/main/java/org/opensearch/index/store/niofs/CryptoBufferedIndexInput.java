@@ -23,6 +23,8 @@ import org.opensearch.index.store.cipher.ChunkCipher;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.index.store.metrics.ErrorType;
 
 /**
  * An IndexInput implementation that decrypts and authenticates data for reading.
@@ -179,6 +181,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         try {
             ChunkCipher.open(keySpec, chunk, scratch.ciphertext.flip(), scratch.entry.flip(), scratch.plaintext.clear());
         } catch (AEADBadTagException e) {
+            CryptoMetricsService.count(ErrorType.AUTH_FAILURE);
             throw new CorruptIndexException("encrypted chunk " + chunk + " failed authentication", this, e);
         } catch (GeneralSecurityException e) {
             throw new IOException("Failed to decrypt chunk " + chunk + ": " + this, e);

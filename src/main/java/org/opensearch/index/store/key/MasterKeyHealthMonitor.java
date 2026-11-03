@@ -32,6 +32,8 @@ import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.index.store.CryptoDirectoryFactory;
+import org.opensearch.index.store.metrics.CryptoMetricsService;
+import org.opensearch.index.store.metrics.ErrorType;
 import org.opensearch.transport.client.Client;
 
 /**
@@ -424,6 +426,7 @@ public class MasterKeyHealthMonitor {
             Settings update = Settings.builder().put(blockKey, true).putList(INDEX_HEALTH_MONITOR_BLOCKS_SETTING.getKey(), owned).build();
             // Async: don't wait for cluster state update
             client.admin().indices().updateSettings(new UpdateSettingsRequest(update, indexName));
+            CryptoMetricsService.count(ErrorType.KMS_INDEX_BLOCKED, indexName);
             logger.warn("Applied {} block to index {}: its master key can't be loaded from the key provider", block, indexName);
         } catch (Exception e) {
             logger.error("Failed to apply {} block to index {}: {}", block, indexName, e.getMessage(), e);

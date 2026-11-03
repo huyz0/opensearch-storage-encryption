@@ -21,18 +21,22 @@ public class CryptoMetricsService {
     private final Histogram cacheStatsHistogram;
     private final Histogram fdCacheStatsHistogram;
     private final Counter errorCounter;
+    private final Counter indexErrorCounter;
 
     // Metric names
     private static final String POOL_STATS_NAME = "crypto.pool.stats";
     private static final String CACHE_STATS_NAME = "crypto.cache.stats";
     private static final String FD_CACHE_STATS_NAME = "crypto.fd_cache.stats";
     private static final String ERROR_COUNTER_NAME = "crypto.error.total";
+    private static final String INDEX_ERROR_COUNTER_NAME = "crypto.index.error.total";
 
     // Metric descriptions
     private static final String POOL_STATS_DESC = "Crypto Pool statistics";
     private static final String CACHE_STATS_DESC = "Crypto Cache statistics";
     private static final String FD_CACHE_STATS_DESC = "FileChannel cache statistics";
-    private static final String ERROR_COUNTER_DESC = "Total crypto operation errors";
+    private static final String ERROR_COUNTER_DESC = "Total crypto operation errors, by error type";
+    private static final String INDEX_ERROR_COUNTER_DESC = "Crypto errors that affect one index, by error type and index. "
+        + "One series per index: collectors that bill per series can drop crypto.index.* by name";
 
     // Units
     private static final String COUNT_UNIT = "count";
@@ -52,6 +56,7 @@ public class CryptoMetricsService {
     private CryptoMetricsService(MetricsRegistry metricsRegistry) {
         this.metricsRegistry = metricsRegistry;
         this.errorCounter = createCounter(ERROR_COUNTER_NAME, ERROR_COUNTER_DESC, COUNT_UNIT);
+        this.indexErrorCounter = createCounter(INDEX_ERROR_COUNTER_NAME, INDEX_ERROR_COUNTER_DESC, COUNT_UNIT);
         this.poolStatsHistogram = createHistogram(POOL_STATS_NAME, POOL_STATS_DESC, COUNT_UNIT);
         this.cacheStatsHistogram = createHistogram(CACHE_STATS_NAME, CACHE_STATS_DESC, COUNT_UNIT);
         this.fdCacheStatsHistogram = createHistogram(FD_CACHE_STATS_NAME, FD_CACHE_STATS_DESC, COUNT_UNIT);
@@ -142,7 +147,7 @@ public class CryptoMetricsService {
     }
 
     /**
-     * Records error count by error type.
+     * Counts an error in {@code crypto.error.total}, tagged by error type only.
      * @param errorType the type of error
      */
     public void recordError(ErrorType errorType) {
@@ -152,13 +157,42 @@ public class CryptoMetricsService {
     }
 
     /**
-     * Records error count by error type at index level.
+     * Counts an error in {@code crypto.error.total} and, for error types that affect a single index
+     * ({@link ErrorType#isIndexLevel()}), also in {@code crypto.index.error.total} tagged with the index name.
+     * The node-level counter stays bounded by the number of error types; the per-index one is separate so
+     * a collector can drop it by name.
      * @param errorType the type of error
      * @param indexName the index name
      */
     public void recordError(ErrorType errorType, String indexName) {
-        if (errorCounter != null) {
-            errorCounter.add(1.0, Tags.create().addTag(ERROR_TYPE_TAG, errorType.getValue()).addTag(INDEX_NAME, indexName));
+        recordError(errorType);
+        if (indexErrorCounter != null && indexName != null && errorType.isIndexLevel()) {
+            indexErrorCounter.add(1.0, Tags.create().addTag(ERROR_TYPE_TAG, errorType.getValue()).addTag(INDEX_NAME, indexName));
+        }
+    }
+
+    /**
+     * {@link #recordError(ErrorType)} on the instance, or nothing if metrics are not initialized
+     * (unit tests, or before the plugin starts). For call sites on read paths that must never fail
+     * because of metrics.
+     * @param errorType the type of error
+     */
+    public static void count(ErrorType errorType) {
+        CryptoMetricsService service = instance;
+        if (service != null) {
+            service.recordError(errorType);
+        }
+    }
+
+    /**
+     * {@link #recordError(ErrorType, String)} on the instance, or nothing if metrics are not initialized.
+     * @param errorType the type of error
+     * @param indexName the index name
+     */
+    public static void count(ErrorType errorType, String indexName) {
+        CryptoMetricsService service = instance;
+        if (service != null) {
+            service.recordError(errorType, indexName);
         }
     }
 
