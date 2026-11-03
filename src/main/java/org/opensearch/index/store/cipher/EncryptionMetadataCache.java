@@ -7,6 +7,8 @@ package org.opensearch.index.store.cipher;
 import java.nio.file.Path;
 import java.util.concurrent.ConcurrentHashMap;
 
+import javax.crypto.spec.SecretKeySpec;
+
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.key.KeyDerivation;
 
@@ -24,10 +26,12 @@ public class EncryptionMetadataCache {
     public static final class FileEncryptionMetadata {
         private final EncryptionFooter footer;
         private final byte[] fileKey;
+        private final SecretKeySpec fileKeySpec;
 
         FileEncryptionMetadata(EncryptionFooter footer, byte[] masterKey) {
             this.footer = footer;
             this.fileKey = KeyDerivation.deriveFileKey(masterKey, footer.getMessageId());
+            this.fileKeySpec = new SecretKeySpec(fileKey, "AES");
         }
 
         public EncryptionFooter getFooter() {
@@ -36,6 +40,15 @@ public class EncryptionMetadataCache {
 
         public byte[] getFileKey() {
             return fileKey;
+        }
+
+        /**
+         * The file key as one shared key object. The AWS-LC binding keeps each thread's AES-GCM context
+         * for the last key object it saw, so reusing this object across block loads of the file keeps
+         * that context instead of rebuilding it on every load.
+         */
+        public SecretKeySpec getFileKeySpec() {
+            return fileKeySpec;
         }
     }
 

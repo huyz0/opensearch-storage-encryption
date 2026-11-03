@@ -117,8 +117,21 @@ public class DirectIOReaderUtil {
         MemorySegment alignedSegment = arena.allocate(alignedLength, alignment);
         ByteBuffer directBuffer = alignedSegment.asByteBuffer();
 
-        int bytesRead = channel.read(directBuffer, alignedOffset);
-        if (bytesRead < 0) {
+        // pread may return fewer bytes than asked without being at the end of the file. Keep reading while
+        // the bytes so far end on an alignment boundary: Direct I/O needs an aligned offset, and a read that
+        // ends off a boundary has reached the end of the file.
+        int bytesRead = 0;
+        while (directBuffer.hasRemaining()) {
+            int n = channel.read(directBuffer, alignedOffset + bytesRead);
+            if (n <= 0) {
+                break;
+            }
+            bytesRead += n;
+            if ((bytesRead & (alignment - 1)) != 0) {
+                break;
+            }
+        }
+        if (bytesRead == 0) {
             // EOF, return empty segment
             return arena.allocate(0);
         }

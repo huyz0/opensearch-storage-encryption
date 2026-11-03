@@ -94,7 +94,10 @@ public final class ChunkEncryptor {
         }
         out.write(sealed, 0, length);
         if (tagBytes == tags.length) {
-            tags = Arrays.copyOf(tags, Math.addExact(tags.length, tags.length));
+            // Doubling past 2^30 bytes would overflow an int before MAX_CHUNKS is reached, so cap the growth
+            // there; the check above keeps tagBytes below this cap.
+            long cap = ChunkCipher.MAX_CHUNKS * ChunkCipher.ENTRY_LENGTH;
+            tags = Arrays.copyOf(tags, (int) Math.min(2L * tags.length, cap));
         }
         System.arraycopy(sealed, length, tags, tagBytes, ChunkCipher.ENTRY_LENGTH);
         tagBytes += ChunkCipher.ENTRY_LENGTH;
