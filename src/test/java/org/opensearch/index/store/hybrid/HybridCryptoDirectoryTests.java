@@ -13,6 +13,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -304,7 +305,8 @@ public class HybridCryptoDirectoryTests {
             Files.write(tempDir.resolve("recovery.abc._1.tim"), new byte[] { 1 });
             hybridDir.rename("recovery.abc._1.tim", "_1.tim");
             verify(bufferPoolDirectory).dropCachedFile("recovery.abc._1.tim");
-            verify(bufferPoolDirectory).dropCachedFile("_1.tim");
+            // before the move, and again after it in case a reader of the old file re-cached it meanwhile
+            verify(bufferPoolDirectory, times(2)).dropCachedFile("_1.tim");
         }
     }
 }

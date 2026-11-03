@@ -207,8 +207,11 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
      */
     @Override
     public void rename(String source, String dest) throws IOException {
+        String destPath = EncryptionMetadataCache.normalizePath(dirPath.resolve(dest));
+        encryptionMetadataCache.invalidateFile(destPath);
         super.rename(source, dest);
+        // Again after the move, in case a reader of the old dest re-cached its footer meanwhile.
         encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(dirPath.resolve(source)));
-        encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(dirPath.resolve(dest)));
+        encryptionMetadataCache.invalidateFile(destPath);
     }
 }

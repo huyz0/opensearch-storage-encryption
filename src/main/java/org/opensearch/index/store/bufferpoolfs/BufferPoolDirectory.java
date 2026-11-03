@@ -248,8 +248,10 @@ public class BufferPoolDirectory extends FSDirectory {
         dropCachedFile(source);
         dropCachedFile(dest);
         super.rename(source, dest);
+        // A reader of the old dest (or of source) can repopulate the caches while the move runs, so drop
+        // again afterwards. Blocks under dest would otherwise be served to readers of the new file.
         dropCachedMetadataAndChannel(dirPath.resolve(source));
-        dropCachedMetadataAndChannel(dirPath.resolve(dest));
+        dropCachedFile(dest);
     }
 
     /**

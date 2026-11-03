@@ -143,10 +143,15 @@ public class HybridCryptoDirectory extends CryptoNIOFSDirectory {
         if (delegeteBufferPool(FileSwitchDirectory.getExtension(source))) {
             bufferPoolDirectory.dropCachedFile(source);
         }
-        if (delegeteBufferPool(FileSwitchDirectory.getExtension(dest))) {
+        boolean destInBufferPool = delegeteBufferPool(FileSwitchDirectory.getExtension(dest));
+        if (destInBufferPool) {
             bufferPoolDirectory.dropCachedFile(dest);
         }
         super.rename(source, dest);
+        if (destInBufferPool) {
+            // A reader of the old dest can re-cache its blocks or channel during the move.
+            bufferPoolDirectory.dropCachedFile(dest);
+        }
     }
 
     @Override

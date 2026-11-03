@@ -187,4 +187,30 @@ public class BufferPoolDirectoryTests extends OpenSearchTestCase {
         }
         assertArrayEquals(data, read);
     }
+
+    /** Renaming onto an existing file whose footer and blocks are cached must serve the new file. */
+    public void testRenameOntoCachedDestinationServesTheNewFile() throws Exception {
+        byte[] oldData = randomByteArrayOfLength(2 * StaticConfigs.CACHE_BLOCK_SIZE + 5);
+        byte[] newData = randomByteArrayOfLength(3 * StaticConfigs.CACHE_BLOCK_SIZE + 17);
+        try (IndexOutput out = directory.createOutput("_1.tim", IOContext.DEFAULT)) {
+            out.writeBytes(oldData, oldData.length);
+        }
+        try (IndexInput in = directory.openInput("_1.tim", IOContext.DEFAULT)) {
+            in.readBytes(new byte[oldData.length], 0, oldData.length);
+        }
+        Path dest = directory.getDirectory().resolve("_1.tim");
+        assertNotNull(blockCache.peek(new FileBlockCacheKey(dest, 0)));
+        try (IndexOutput out = directory.createOutput("replication.xyz._1.tim", IOContext.DEFAULT)) {
+            out.writeBytes(newData, newData.length);
+        }
+
+        directory.rename("replication.xyz._1.tim", "_1.tim");
+
+        byte[] read = new byte[newData.length];
+        try (IndexInput in = directory.openInput("_1.tim", IOContext.DEFAULT)) {
+            assertEquals(newData.length, in.length());
+            in.readBytes(read, 0, read.length);
+        }
+        assertArrayEquals(newData, read);
+    }
 }
