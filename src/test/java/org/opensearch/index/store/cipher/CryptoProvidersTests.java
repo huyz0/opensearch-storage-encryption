@@ -7,9 +7,11 @@ package org.opensearch.index.store.cipher;
 import java.security.Key;
 import java.security.Provider;
 import java.security.SecureRandom;
+import java.security.SecureRandomSpi;
 import java.security.Security;
 import java.security.spec.AlgorithmParameterSpec;
 import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.crypto.Cipher;
 import javax.crypto.Mac;
@@ -49,18 +51,44 @@ public class CryptoProvidersTests extends OpenSearchTestCase {
     public void testProvidersArePinnedAtStartup() throws Exception {
         Provider before = CryptoProviders.mac(CryptoProviders.HMAC).getProvider();
         Provider beforeRandom = CryptoProviders.nonceRandom().getProvider();
+        String randomAlgorithm = CryptoProviders.nonceRandom().getAlgorithm();
         Provider shadow = new Provider("ShadowForTest", "1.0", "test provider") {
             {
                 put("Mac." + CryptoProviders.HMAC, ShadowMac.class.getName());
+                // SecureRandom needs no signed provider on any JDK, so this part runs everywhere.
+                put("SecureRandom." + randomAlgorithm, ShadowRandom.class.getName());
             }
         };
         assertEquals(1, Security.insertProviderAt(shadow, 1));
         try {
-            assertSame(shadow, Mac.getInstance(CryptoProviders.HMAC).getProvider());
-            assertSame(before, CryptoProviders.mac(CryptoProviders.HMAC).getProvider());
+            assertSame(shadow, new SecureRandom().getProvider());
+            // A new thread gets a fresh nonce source, which must still come from the pinned provider.
+            AtomicReference<Provider> fromNewThread = new AtomicReference<>();
+            Thread thread = new Thread(() -> fromNewThread.set(CryptoProviders.nonceRandom().getProvider()));
+            thread.start();
+            thread.join();
+            assertSame(beforeRandom, fromNewThread.get());
             assertSame(beforeRandom, CryptoProviders.nonceRandom().getProvider());
+
+            // Oracle's JDK only picks signed JCE providers, so the shadow MAC is first in the order only on other JDKs
+            // (such as Temurin in CI); either way the plugin must still get the pinned provider.
+            assertSame(before, CryptoProviders.mac(CryptoProviders.HMAC).getProvider());
         } finally {
             Security.removeProvider(shadow.getName());
+        }
+    }
+
+    /** A random source that only exists to sit first in the provider order. */
+    public static final class ShadowRandom extends SecureRandomSpi {
+        @Override
+        protected void engineSetSeed(byte[] seed) {}
+
+        @Override
+        protected void engineNextBytes(byte[] bytes) {}
+
+        @Override
+        protected byte[] engineGenerateSeed(int numBytes) {
+            return new byte[numBytes];
         }
     }
 
