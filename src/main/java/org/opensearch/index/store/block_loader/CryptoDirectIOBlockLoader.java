@@ -145,7 +145,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             EncryptionFooter footer = readFooterFromDisk(normalizedPath, filePath, masterKey);
             var metadata = encryptionMetadataCache.getOrLoadMetadata(normalizedPath, footer, masterKey);
             dataLength = metadata.getFooter().getDataLength();
-            SecretKeySpec fileKey = new SecretKeySpec(metadata.getFileKey(), "AES");
+            SecretKeySpec fileKey = metadata.getFileKeySpec();
             messageId = metadata.getFooter().getMessageId();
 
             // The footer and tags may come from caches, so check the size on every load: truncation is corruption.

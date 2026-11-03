@@ -90,7 +90,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         if (fc.size() != expectedSize) {
             throw new CorruptIndexException("encrypted file size " + fc.size() + " does not match its footer (" + expectedSize + ")", this);
         }
-        this.keySpec = new SecretKeySpec(metadata.getFileKey(), "AES");
+        this.keySpec = metadata.getFileKeySpec();
         this.indexName = keyResolver instanceof DefaultKeyResolver r ? r.getIndexName() : null;
         this.off = 0L;
         this.end = dataLength;
