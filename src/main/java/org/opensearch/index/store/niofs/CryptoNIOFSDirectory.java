@@ -198,4 +198,17 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         super.deleteFile(name);
         encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(dirPath.resolve(name)));
     }
+
+    /**
+     * Renames a file and drops the footer and file key cached under both names; the next read loads
+     * them under the new name. Peer recovery and segment replication write every file under a
+     * temporary name and rename it, so without this an entry per temporary name would stay cached
+     * until the shard closes.
+     */
+    @Override
+    public void rename(String source, String dest) throws IOException {
+        super.rename(source, dest);
+        encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(dirPath.resolve(source)));
+        encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(dirPath.resolve(dest)));
+    }
 }
