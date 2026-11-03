@@ -306,13 +306,14 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         // Cache miss - read from disk using a buffered channel (footer reads are small, no O_DIRECT needed)
         try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
             long fileSize = channel.size();
-            if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+            if (fileSize < EncryptionMetadataTrailer.MIN_ENCRYPTED_FILE_SIZE) {
                 throw new IOException("File too small to contain footer: " + filePath);
             }
 
             // Read minimum footer to check OSEF magic bytes
             ByteBuffer minBuffer = ByteBuffer.allocate(EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-            channel.read(minBuffer, fileSize - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+            channel
+                .read(minBuffer, fileSize - EncryptionMetadataTrailer.LUCENE_FOOTER_COPY_SIZE - EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
             byte[] minFooterBytes = minBuffer.array();
 
             // Check if this is an OSEF file

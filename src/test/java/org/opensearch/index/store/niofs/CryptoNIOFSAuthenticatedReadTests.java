@@ -58,7 +58,7 @@ public class CryptoNIOFSAuthenticatedReadTests extends OpenSearchTestCase {
             write(name, data);
 
             Path file = dir.resolve(name);
-            assertEquals(length + ChunkCipher.tagTableLength(length) + EncryptionMetadataTrailer.MIN_FOOTER_SIZE, Files.size(file));
+            assertEquals(length + ChunkCipher.tagTableLength(length) + EncryptionMetadataTrailer.MIN_ENCRYPTED_FILE_SIZE, Files.size(file));
             try (Directory d = openDirectory()) {
                 assertEquals(length, d.fileLength(name));
                 assertArrayEquals(data, readAll(d, name));
@@ -124,19 +124,19 @@ public class CryptoNIOFSAuthenticatedReadTests extends OpenSearchTestCase {
     public void testRemovedChunkIsDetected() throws IOException {
         byte[] data = randomByteArrayOfLength(3 * CHUNK);
         write(FILE, data);
-        // Drop the last chunk and its tag but keep the authenticated footer.
+        // Drop the last chunk and its tag but keep the authenticated footer and the Lucene footer copy.
         byte[] file = Files.readAllBytes(dir.resolve(FILE));
         byte[] cut = new byte[file.length - CHUNK - ChunkCipher.ENTRY_LENGTH];
         System.arraycopy(file, 0, cut, 0, 2 * CHUNK);
         System.arraycopy(file, data.length, cut, 2 * CHUNK, 2 * ChunkCipher.ENTRY_LENGTH);
-        int footerStart = file.length - EncryptionMetadataTrailer.MIN_FOOTER_SIZE;
+        int footerStart = file.length - EncryptionMetadataTrailer.MIN_ENCRYPTED_FILE_SIZE;
         System
             .arraycopy(
                 file,
                 footerStart,
                 cut,
-                cut.length - EncryptionMetadataTrailer.MIN_FOOTER_SIZE,
-                EncryptionMetadataTrailer.MIN_FOOTER_SIZE
+                cut.length - EncryptionMetadataTrailer.MIN_ENCRYPTED_FILE_SIZE,
+                EncryptionMetadataTrailer.MIN_ENCRYPTED_FILE_SIZE
             );
         Files.write(dir.resolve(FILE), cut);
 
@@ -162,9 +162,14 @@ public class CryptoNIOFSAuthenticatedReadTests extends OpenSearchTestCase {
     public void testBadKeyMetadataLengthIsCorruptionNotACrash() throws IOException {
         write(FILE, randomByteArrayOfLength(100));
         long size = Files.size(dir.resolve(FILE));
-        // KeyMetadataLength sits 12 bytes before the end: [KeyMetadataLength 2][AlgorithmId 2][FooterLength 4][Magic 4]
+        // KeyMetadataLength sits 12 bytes before the end of the footer, which is followed by the 16-byte Lucene footer copy:
+        // [KeyMetadataLength 2][AlgorithmId 2][FooterLength 4][Magic 4][LuceneFooterCopy 16]
         try (FileChannel ch = FileChannel.open(dir.resolve(FILE), StandardOpenOption.WRITE)) {
-            ch.write(ByteBuffer.wrap(new byte[] { (byte) (randomBoolean() ? 0x7f : 0xff), (byte) 0xff }), size - 12);
+            ch
+                .write(
+                    ByteBuffer.wrap(new byte[] { (byte) (randomBoolean() ? 0x7f : 0xff), (byte) 0xff }),
+                    size - 12 - EncryptionMetadataTrailer.LUCENE_FOOTER_COPY_SIZE
+                );
         }
         try (Directory d = openDirectory()) {
             expectThrows(CorruptIndexException.class, () -> d.openInput(FILE, IOContext.DEFAULT));

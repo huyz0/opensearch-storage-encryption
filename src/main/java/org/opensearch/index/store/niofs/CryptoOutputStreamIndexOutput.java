@@ -113,6 +113,7 @@ public final class CryptoOutputStreamIndexOutput extends OutputStreamIndexOutput
             try (OutputStream o = out) {
                 footer.setDataLength(encryptor.finish(o));
                 o.write(footer.serialize(fileKey));
+                o.write(encryptor.luceneFooterCopy());
             }
 
             if (normalizedFilePath != null) {

@@ -264,10 +264,10 @@ public class BufferPoolDirectory extends FSDirectory {
 
     /**
      * Calculate content length by reading footer if file is an OSEF file.
-     * Returns raw file size for non-OSEF files (< MIN_FOOTER_SIZE).
+     * Returns raw file size for non-OSEF files (< MIN_ENCRYPTED_FILE_SIZE).
      */
     private long calculateContentLengthWithValidation(Path file, long rawFileSize) throws IOException {
-        if (rawFileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+        if (rawFileSize < EncryptionMetadataTrailer.MIN_ENCRYPTED_FILE_SIZE) {
             return rawFileSize;
         }
 
