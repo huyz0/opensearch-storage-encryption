@@ -245,12 +245,17 @@ jobs:
           - platform: linux-aarch64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    # dnf on the arm runner can take over half an hour on slow mirror days.
+    timeout-minutes: 75
     permissions:
       contents: read
     container: almalinux:8
     steps:
       - name: Install build tools
-        run: dnf -y --enablerepo=powertools install git cmake ninja-build golang perl gcc gcc-c++ binutils
+        run: |
+          dnf -y --enablerepo=powertools install epel-release
+          dnf -y --enablerepo=powertools install git cmake ninja-build golang perl gcc gcc-c++ binutils patchelf
+          gcc --version | head -1; go version; cmake --version | head -1
 
       - name: Checkout opensearch-storage-encryption
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -260,8 +265,9 @@ jobs:
       - name: Build AWS-LC FIPS
         run: scripts/build-aws-lc-fips.sh "$PWD/aws-lc-fips/libawslc-fips-crypto.so" "$RUNNER_TEMP/aws-lc-work"
 
-      - name: Check the glibc it needs
+      - name: Check the glibc it needs and its SONAME
         run: |
+          readelf -d aws-lc-fips/libawslc-fips-crypto.so | grep -q 'Library soname: \[libawslc-fips-crypto.so\]'
           newest=$(objdump -T aws-lc-fips/libawslc-fips-crypto.so | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
           echo "newest glibc symbol version: $newest"
           [ "$(printf '%s\nGLIBC_2.28\n' "$newest" | sort -V | tail -1)" = "GLIBC_2.28" ]
@@ -279,6 +285,7 @@ jobs:
     # approved-only mode (the YAML REST cluster runs with OPENSEARCH_FIPS_MODE=true).
     needs: ["Get-CI-Image-Tag", "build", "aws-lc-fips"]
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read
     container:
