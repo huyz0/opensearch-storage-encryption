@@ -18,6 +18,8 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 
+import org.opensearch.secure_sm.AccessController;
+
 /**
  * Node-level cache of {@link FileChannel} instances, bounded by max open FDs
  * and optional time-based expiry for idle channels.
@@ -200,10 +202,14 @@ public class FileChannelCache implements Closeable {
 
     private RefCountedChannel openChannel(String path) {
         try {
-            // Uninterruptible where supported, so an interrupted reader cannot close the shared channel
-            FileChannel fc = directOpenOption != null
-                ? NativeFileChannel.open(Paths.get(path), StandardOpenOption.READ, directOpenOption)
-                : NativeFileChannel.open(Paths.get(path), StandardOpenOption.READ);
+            // Uninterruptible where supported, so an interrupted reader cannot close the shared channel.
+            // Privileged because a cache miss can open the file from inside a caller with no file
+            // permissions, such as a Painless script reading doc values; the runtime agent would deny it.
+            Path file = Paths.get(path);
+            OpenOption[] options = directOpenOption != null
+                ? new OpenOption[] { StandardOpenOption.READ, directOpenOption }
+                : new OpenOption[] { StandardOpenOption.READ };
+            FileChannel fc = AccessController.doPrivilegedChecked(() -> NativeFileChannel.open(file, options));
             return new RefCountedChannel(fc);
         } catch (IOException e) {
             throw new RuntimeException("Failed to open FileChannel: " + path, e);
