@@ -4,66 +4,89 @@
  */
 package org.opensearch.index.store.cipher;
 
+import java.security.Key;
 import java.security.Provider;
 import java.security.SecureRandom;
-import java.util.Map;
+import java.security.Security;
+import java.security.spec.AlgorithmParameterSpec;
+import java.util.Arrays;
+
+import javax.crypto.Cipher;
+import javax.crypto.Mac;
+import javax.crypto.MacSpi;
 
 import org.opensearch.test.OpenSearchTestCase;
 
 public class CryptoProvidersTests extends OpenSearchTestCase {
 
-    private static final Provider SUN = new Provider(CryptoProviders.DEFAULT_PROVIDER, "1", "stub") {
-    };
-    private static final Provider BC = new Provider(CryptoProviders.FIPS_PROVIDER, "1", "stub") {
-    };
-
-    public void testDefaultBuildOutsideFipsModeUsesSunJce() {
-        assertSame(SUN, CryptoProviders.choose(false, false, Map.of("SunJCE", SUN, "BCFIPS", BC)::get));
-    }
-
-    public void testApprovedOnlyModeUsesBcFipsEvenWhenSunJceIsInstalled() {
-        assertSame(BC, CryptoProviders.choose(false, true, Map.of("SunJCE", SUN, "BCFIPS", BC)::get));
-        assertSame(BC, CryptoProviders.choose(true, true, Map.of("SunJCE", SUN, "BCFIPS", BC)::get));
+    public void testDefaultBuildRunsInEitherMode() {
+        CryptoProviders.requireFipsModeForFipsBuild(false, false);
+        CryptoProviders.requireFipsModeForFipsBuild(false, true);
+        CryptoProviders.requireFipsModeForFipsBuild(true, true);
     }
 
     public void testFipsBuildRefusesNonFipsNode() {
-        IllegalStateException e = expectThrows(
-            IllegalStateException.class,
-            () -> CryptoProviders.choose(true, false, Map.of("SunJCE", SUN, "BCFIPS", BC)::get)
-        );
+        IllegalStateException e = expectThrows(IllegalStateException.class, () -> CryptoProviders.requireFipsModeForFipsBuild(true, false));
         assertTrue(e.getMessage(), e.getMessage().contains("OPENSEARCH_FIPS_MODE=true"));
     }
 
-    public void testApprovedOnlyModeWithoutBcFipsFails() {
-        IllegalStateException e = expectThrows(
-            IllegalStateException.class,
-            () -> CryptoProviders.choose(false, true, Map.of("SunJCE", SUN)::get)
-        );
-        assertTrue(e.getMessage(), e.getMessage().contains("BCFIPS"));
-    }
-
-    public void testFallsBackToBcFipsWhenSunJceWasRemoved() {
-        // OpenSearch removes SunJCE when OPENSEARCH_CRYPTO_STANDARD=FIPS-140-3 even without approved-only mode.
-        assertSame(BC, CryptoProviders.choose(false, false, Map.of("BCFIPS", BC)::get));
-        expectThrows(IllegalStateException.class, () -> CryptoProviders.choose(false, false, Map.<String, Provider>of()::get));
-    }
-
-    public void testSelfTestPassesWithChosenProvider() {
-        CryptoProviders.selfTest(CryptoProviders.provider());
+    public void testSelfTestsPassWithTheJvmOrder() {
+        CryptoProviders.selfTest();
+        CryptoProviders.selfTestCtr();
+        CryptoProviders.selfTestSealNonce(CryptoProviders.nonceRandom());
         CryptoProviders.checkAtStartup();
     }
 
-    public void testSelfTestFailsWithProviderWithoutAesGcm() {
-        expectThrows(IllegalStateException.class, () -> CryptoProviders.selfTest(SUN));
+    /** No provider is named: the plugin gets what the JVM's order gives for each algorithm, like OpenSearch core. */
+    public void testUsesTheJvmProviderOrder() throws Exception {
+        assertEquals(Cipher.getInstance("AES/GCM/NoPadding").getProvider(), CryptoProviders.cipher("AES/GCM/NoPadding").getProvider());
+        assertEquals(Cipher.getInstance("AES/CTR/NoPadding").getProvider(), CryptoProviders.cipher("AES/CTR/NoPadding").getProvider());
+        assertEquals(Cipher.getInstance("AES/GCM/NoPadding").getProvider(), CryptoProviders.provider());
+        assertEquals(Security.getProviders()[0].getName().equals(CryptoProviders.FIPS_PROVIDER), CryptoProviders.isFipsMode());
     }
 
-    public void testSealNonceSelfTestPasses() {
-        CryptoProviders.selfTestSealNonce(CryptoProviders.provider(), CryptoProviders.provider(), CryptoProviders.nonceRandom());
+    /** A provider added to the front of the JVM's order after startup does not change what the plugin uses. */
+    public void testProvidersArePinnedAtStartup() throws Exception {
+        Provider before = CryptoProviders.mac(CryptoProviders.HMAC).getProvider();
+        Provider beforeRandom = CryptoProviders.nonceRandom().getProvider();
+        Provider shadow = new Provider("ShadowForTest", "1.0", "test provider") {
+            {
+                put("Mac." + CryptoProviders.HMAC, ShadowMac.class.getName());
+            }
+        };
+        assertEquals(1, Security.insertProviderAt(shadow, 1));
+        try {
+            assertSame(shadow, Mac.getInstance(CryptoProviders.HMAC).getProvider());
+            assertSame(before, CryptoProviders.mac(CryptoProviders.HMAC).getProvider());
+            assertSame(beforeRandom, CryptoProviders.nonceRandom().getProvider());
+        } finally {
+            Security.removeProvider(shadow.getName());
+        }
     }
 
-    public void testCtrSelfTestPassesWithChosenProvider() {
-        CryptoProviders.selfTestCtr(CryptoProviders.provider());
-        expectThrows(IllegalStateException.class, () -> CryptoProviders.selfTestCtr(SUN));
+    /** A MAC that only exists to sit first in the provider order. */
+    public static final class ShadowMac extends MacSpi {
+        @Override
+        protected int engineGetMacLength() {
+            return 48;
+        }
+
+        @Override
+        protected void engineInit(Key key, AlgorithmParameterSpec params) {}
+
+        @Override
+        protected void engineUpdate(byte input) {}
+
+        @Override
+        protected void engineUpdate(byte[] input, int offset, int len) {}
+
+        @Override
+        protected byte[] engineDoFinal() {
+            return new byte[48];
+        }
+
+        @Override
+        protected void engineReset() {}
     }
 
     /** In a FIPS build every test JVM runs approved-only, so this checks the build wiring end to end. */
@@ -71,7 +94,8 @@ public class CryptoProvidersTests extends OpenSearchTestCase {
         assertEquals(CryptoProviders.isFipsBuild(), CryptoProviders.isApprovedOnlyMode());
         assertEquals(CryptoProviders.isFipsBuild(), CryptoProviders.isFipsMode());
         if (CryptoProviders.isFipsBuild()) {
-            // The FIPS build bundles the AWS-LC FIPS module for AES-GCM, AES-CTR, the KDF and the DRBG.
+            // The FIPS build bundles the AWS-LC FIPS module for AES-GCM, AES-CTR, the KDF and the DRBG; JCE (BCFIPS first)
+            // does the rest.
             assertNotNull("the bundled AWS-LC FIPS module did not load", CryptoProviders.awsLc());
             assertEquals(AwsLcFips.EXPECTED_VERSION, CryptoProviders.awsLc().version());
             assertEquals(CryptoProviders.FIPS_PROVIDER, CryptoProviders.provider().getName());
@@ -82,9 +106,8 @@ public class CryptoProvidersTests extends OpenSearchTestCase {
             byte[] b = new byte[16];
             random.nextBytes(a);
             random.nextBytes(b);
-            assertFalse(java.util.Arrays.equals(a, b));
+            assertFalse(Arrays.equals(a, b));
         } else {
-            assertEquals(CryptoProviders.DEFAULT_PROVIDER, CryptoProviders.provider().getName());
             assertNull(CryptoProviders.awsLc());
         }
     }
