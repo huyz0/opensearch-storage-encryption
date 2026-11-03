@@ -35,6 +35,7 @@ import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
 import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
+import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.index.store.metrics.ErrorType;
 import org.opensearch.index.store.pool.Pool;
@@ -202,7 +203,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
         } catch (AEADBadTagException e) {
             // Don't keep a tag page that may have been read badly; the next load reads it again.
             tagCache.invalidate(messageId, dataLength, chunk);
-            CryptoMetricsService.count(ErrorType.AUTH_FAILURE);
+            CryptoMetricsService.count(ErrorType.AUTH_FAILURE, ShardKeyResolverRegistry.indexNameForFile(filePath.toString()));
             throw new CorruptIndexException("encrypted chunk " + chunk + " failed authentication", filePath.toString(), e);
         } catch (NoSuchFileException e) {
             throw e;

@@ -22,6 +22,7 @@ import org.opensearch.common.SuppressForbidden;
 import org.opensearch.index.store.cipher.ChunkCipher;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.footer.EncryptionFooter;
+import org.opensearch.index.store.key.DefaultKeyResolver;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.index.store.metrics.ErrorType;
@@ -47,6 +48,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
     /** Plaintext length of the whole file; the tag table starts here. */
     private final long dataLength;
     private final SecretKeySpec keySpec;
+    /** For the per-index auth failure count; null if the resolver doesn't know it. */
+    private final String indexName;
 
     /**
      * Per-thread chunk buffers and the last chunk decrypted on this thread. Lucene creates many
@@ -88,6 +91,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             throw new CorruptIndexException("encrypted file size " + fc.size() + " does not match its footer (" + expectedSize + ")", this);
         }
         this.keySpec = new SecretKeySpec(metadata.getFileKey(), "AES");
+        this.indexName = keyResolver instanceof DefaultKeyResolver r ? r.getIndexName() : null;
         this.off = 0L;
         this.end = dataLength;
     }
@@ -99,7 +103,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         long length,
         int bufferSize,
         long dataLength,
-        SecretKeySpec keySpec
+        SecretKeySpec keySpec,
+        String indexName
     ) {
         super(resourceDesc, bufferSize);
         this.channel = fc;
@@ -108,6 +113,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         this.end = off + length;
         this.dataLength = dataLength;
         this.keySpec = keySpec;
+        this.indexName = indexName;
     }
 
     @Override
@@ -138,7 +144,8 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
             length,
             getBufferSize(),
             dataLength,
-            keySpec
+            keySpec,
+            indexName
         );
     }
 
@@ -181,7 +188,7 @@ final class CryptoBufferedIndexInput extends BufferedIndexInput {
         try {
             ChunkCipher.open(keySpec, chunk, scratch.ciphertext.flip(), scratch.entry.flip(), scratch.plaintext.clear());
         } catch (AEADBadTagException e) {
-            CryptoMetricsService.count(ErrorType.AUTH_FAILURE);
+            CryptoMetricsService.count(ErrorType.AUTH_FAILURE, indexName);
             throw new CorruptIndexException("encrypted chunk " + chunk + " failed authentication", this, e);
         } catch (GeneralSecurityException e) {
             throw new IOException("Failed to decrypt chunk " + chunk + ": " + this, e);
