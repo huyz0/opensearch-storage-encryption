@@ -47,7 +47,7 @@ final class TranslogCipher {
 
     private static final ThreadLocal<Cipher> CTR = ThreadLocal.withInitial(() -> {
         try {
-            return Cipher.getInstance("AES/CTR/NoPadding", CryptoProviders.provider());
+            return CryptoProviders.cipher("AES/CTR/NoPadding");
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("AES/CTR/NoPadding is not available", e);
         }

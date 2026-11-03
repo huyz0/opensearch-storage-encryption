@@ -62,7 +62,7 @@ public final class ChunkCipher {
      * cost far less than the decryption.
      */
     private static final class OpenScratch {
-        final Cipher cipher = newCipher(CryptoProviders.provider());
+        final Cipher cipher = newCipher();
         final byte[] sealed = new byte[CHUNK_SIZE + TAG_LENGTH];
         final byte[] nonce = new byte[NONCE_LENGTH];
         final byte[] aad = new byte[AAD_LENGTH];
@@ -73,14 +73,10 @@ public final class ChunkCipher {
 
     private ChunkCipher() {}
 
-    /** Returns a new AES/GCM cipher for {@link #seal}, from {@link CryptoProviders#provider()}. Writers keep their own instance. */
+    /** Returns a new AES/GCM cipher for {@link #seal}, from {@link CryptoProviders#cipher}. Writers keep their own instance. */
     public static Cipher newCipher() {
-        return newCipher(CryptoProviders.provider());
-    }
-
-    private static Cipher newCipher(java.security.Provider provider) {
         try {
-            return Cipher.getInstance(TRANSFORMATION, provider);
+            return CryptoProviders.cipher(TRANSFORMATION);
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("AES/GCM is not available", e);
         }
