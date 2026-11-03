@@ -435,11 +435,6 @@ public class BlockSlotTinyCacheIntegrationTests extends OpenSearchTestCase {
         }
 
         @Override
-        public void recordStats() {
-            // No-op for test
-        }
-
-        @Override
         public double getHitRate() {
             return 1.0; // Mock always hits
         }

@@ -4,9 +4,10 @@
  */
 package org.opensearch.index.store.metrics;
 
-import org.opensearch.index.store.pool.SegmentType;
+import java.io.Closeable;
+import java.util.function.Supplier;
+
 import org.opensearch.telemetry.metrics.Counter;
-import org.opensearch.telemetry.metrics.Histogram;
 import org.opensearch.telemetry.metrics.MetricsRegistry;
 import org.opensearch.telemetry.metrics.tags.Tags;
 
@@ -17,23 +18,14 @@ import org.opensearch.telemetry.metrics.tags.Tags;
 public class CryptoMetricsService {
     private static volatile CryptoMetricsService instance;
     private final MetricsRegistry metricsRegistry;
-    private final Histogram poolStatsHistogram;
-    private final Histogram cacheStatsHistogram;
-    private final Histogram fdCacheStatsHistogram;
     private final Counter errorCounter;
     private final Counter indexErrorCounter;
 
     // Metric names
-    private static final String POOL_STATS_NAME = "crypto.pool.stats";
-    private static final String CACHE_STATS_NAME = "crypto.cache.stats";
-    private static final String FD_CACHE_STATS_NAME = "crypto.fd_cache.stats";
     private static final String ERROR_COUNTER_NAME = "crypto.error.total";
     private static final String INDEX_ERROR_COUNTER_NAME = "crypto.index.error.total";
 
     // Metric descriptions
-    private static final String POOL_STATS_DESC = "Crypto Pool statistics";
-    private static final String CACHE_STATS_DESC = "Crypto Cache statistics";
-    private static final String FD_CACHE_STATS_DESC = "FileChannel cache statistics";
     private static final String ERROR_COUNTER_DESC = "Total crypto operation errors, by error type";
     private static final String INDEX_ERROR_COUNTER_DESC = "Crypto errors that affect one index, by error type and index. "
         + "One series per index: collectors that bill per series can drop crypto.index.* by name";
@@ -43,7 +35,6 @@ public class CryptoMetricsService {
 
     // Tag names
     private static final String ERROR_TYPE_TAG = "error_type";
-    private static final String STAT_TYPE_TAG = "stat_type";
     private static final String INDEX_NAME = "index_name";
 
     // Error message
@@ -57,9 +48,6 @@ public class CryptoMetricsService {
         this.metricsRegistry = metricsRegistry;
         this.errorCounter = createCounter(ERROR_COUNTER_NAME, ERROR_COUNTER_DESC, COUNT_UNIT);
         this.indexErrorCounter = createCounter(INDEX_ERROR_COUNTER_NAME, INDEX_ERROR_COUNTER_DESC, COUNT_UNIT);
-        this.poolStatsHistogram = createHistogram(POOL_STATS_NAME, POOL_STATS_DESC, COUNT_UNIT);
-        this.cacheStatsHistogram = createHistogram(CACHE_STATS_NAME, CACHE_STATS_DESC, COUNT_UNIT);
-        this.fdCacheStatsHistogram = createHistogram(FD_CACHE_STATS_NAME, FD_CACHE_STATS_DESC, COUNT_UNIT);
     }
 
     /**
@@ -85,65 +73,20 @@ public class CryptoMetricsService {
     }
 
     /**
-     * Records pool statistics as separate time series.
-     * @param maxSegments maximum segments
-     * @param allocated allocated segments
-     * @param free free segments
-     * @param utilization utilization percentage (0-100)
-     * @param allocation allocation percentage (0-100)
+     * Registers a gauge that the telemetry exporter reads when it collects, so the value is always current
+     * and nothing runs on a timer here. Close the returned handle to unregister it.
+     *
+     * @param name metric name
+     * @param description metric description
+     * @param unit metric unit
+     * @param value reads the current value; must be cheap and must not throw
+     * @return handle that unregisters the gauge; a no-op when metrics are disabled
      */
-    public void recordPoolStats(SegmentType segmentType, int maxSegments, int allocated, int free, double utilization, double allocation) {
-        if (poolStatsHistogram == null)
-            return;
-
-        Tags baseTags = Tags.create().addTag("segment_type", segmentType.getValue());
-        poolStatsHistogram.record(maxSegments, baseTags.addTag(STAT_TYPE_TAG, "max"));
-        poolStatsHistogram.record(allocated, baseTags.addTag(STAT_TYPE_TAG, "allocated"));
-        poolStatsHistogram.record(free, baseTags.addTag(STAT_TYPE_TAG, "free"));
-        poolStatsHistogram.record(utilization, baseTags.addTag(STAT_TYPE_TAG, "utilization"));
-        poolStatsHistogram.record(allocation, baseTags.addTag(STAT_TYPE_TAG, "allocation"));
-    }
-
-    /**
-     * Records cache statistics as separate time series.
-     * @param size cache size
-     * @param hits hit count
-     * @param misses miss count
-     * @param hitRate hit rate percentage (0-100)
-     * @param loads load count
-     * @param evictions eviction count
-     * @param avgLoadTimeMs average load time in milliseconds
-     */
-    public void recordCacheStats(long size, long hits, long misses, double hitRate, long loads, long evictions, double avgLoadTimeMs) {
-        if (cacheStatsHistogram == null)
-            return;
-
-        cacheStatsHistogram.record(size, Tags.create().addTag(STAT_TYPE_TAG, "size"));
-        cacheStatsHistogram.record(hits, Tags.create().addTag(STAT_TYPE_TAG, "hits"));
-        cacheStatsHistogram.record(misses, Tags.create().addTag(STAT_TYPE_TAG, "misses"));
-        cacheStatsHistogram.record(hitRate, Tags.create().addTag(STAT_TYPE_TAG, "hit_rate"));
-        cacheStatsHistogram.record(loads, Tags.create().addTag(STAT_TYPE_TAG, "loads"));
-        cacheStatsHistogram.record(evictions, Tags.create().addTag(STAT_TYPE_TAG, "evictions"));
-        cacheStatsHistogram.record(avgLoadTimeMs, Tags.create().addTag(STAT_TYPE_TAG, "avg_load_time"));
-    }
-
-    /**
-     * Records FileChannel cache statistics.
-     * @param size current number of cached channels
-     * @param hits hit count
-     * @param misses miss count
-     * @param hitRate hit rate percentage (0-100)
-     * @param evictions eviction count
-     */
-    public void recordFdCacheStats(long size, long hits, long misses, double hitRate, long evictions) {
-        if (fdCacheStatsHistogram == null)
-            return;
-
-        fdCacheStatsHistogram.record(size, Tags.create().addTag(STAT_TYPE_TAG, "size"));
-        fdCacheStatsHistogram.record(hits, Tags.create().addTag(STAT_TYPE_TAG, "hits"));
-        fdCacheStatsHistogram.record(misses, Tags.create().addTag(STAT_TYPE_TAG, "misses"));
-        fdCacheStatsHistogram.record(hitRate, Tags.create().addTag(STAT_TYPE_TAG, "hit_rate"));
-        fdCacheStatsHistogram.record(evictions, Tags.create().addTag(STAT_TYPE_TAG, "evictions"));
+    public Closeable registerGauge(String name, String description, String unit, Supplier<Double> value) {
+        if (metricsRegistry == null) {
+            return () -> {};
+        }
+        return metricsRegistry.createGauge(name, description, unit, value, Tags.EMPTY);
     }
 
     /**
@@ -199,10 +142,6 @@ public class CryptoMetricsService {
     // Private helper methods
     private Counter createCounter(String name, String description, String unit) {
         return metricsRegistry != null ? metricsRegistry.createCounter(name, description, unit) : null;
-    }
-
-    private Histogram createHistogram(String name, String description, String unit) {
-        return metricsRegistry != null ? metricsRegistry.createHistogram(name, description, unit) : null;
     }
 
 }

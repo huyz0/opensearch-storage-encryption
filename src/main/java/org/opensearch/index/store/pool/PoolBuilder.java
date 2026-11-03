@@ -7,7 +7,7 @@ package org.opensearch.index.store.pool;
 import static org.opensearch.index.store.bufferpoolfs.StaticConfigs.CACHE_BLOCK_SIZE;
 
 import java.io.Closeable;
-import java.time.Duration;
+import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -44,7 +44,7 @@ public final class PoolBuilder {
     /**
      * Container for shared pool resources with lifecycle management.
      * This class holds references to the shared memory segment pool, block cache,
-     * telemetry thread, and read-ahead executor service,
+     * metrics gauges, and read-ahead executor service,
      * providing proper cleanup when closed.
      */
     public static class PoolResources implements Closeable {
@@ -53,7 +53,7 @@ public final class PoolBuilder {
         private final long maxCacheBlocks;
         private final int readAheadQueueSize;
         private final Worker sharedReadaheadWorker;
-        private final TelemetryThread telemetry;
+        private final Closeable telemetry;
         private final ExecutorService readAheadExecutor;
         private final FileChannelCache fileChannelCache;
         private final ChunkTagCache chunkTagCache = new ChunkTagCache(ChunkTagCache.DEFAULT_MAX_BYTES);
@@ -64,7 +64,7 @@ public final class PoolBuilder {
             long maxCacheBlocks,
             int readAheadQueueSize,
             Worker sharedReadaheadWorker,
-            TelemetryThread telemetry,
+            Closeable telemetry,
             ExecutorService readAheadExecutor,
             FileChannelCache fileChannelCache
         ) {
@@ -154,7 +154,7 @@ public final class PoolBuilder {
         }
 
         /**
-         * Closes the shared pool resources, stops the telemetry thread, and shuts down executors.
+         * Closes the shared pool resources, unregisters the metrics gauges, and shuts down executors.
          */
         @Override
         public void close() {
@@ -163,7 +163,11 @@ public final class PoolBuilder {
                 fileChannelCache.close();
             }
             if (telemetry != null) {
-                telemetry.close();
+                try {
+                    telemetry.close();
+                } catch (IOException e) {
+                    LOGGER.debug("Failed to unregister pool gauges", e);
+                }
             }
             if (sharedReadaheadWorker != null) {
                 try {
@@ -182,66 +186,6 @@ public final class PoolBuilder {
                     Thread.currentThread().interrupt();
                     readAheadExecutor.shutdownNow();
                 }
-            }
-        }
-    }
-
-    /**
-     * Autocloseable telemetry thread for periodic pool statistics logging.
-     */
-    private static class TelemetryThread implements Closeable {
-        private final Thread thread;
-        private final Pool<RefCountedMemorySegment> pool;
-        private final BlockCache<RefCountedMemorySegment> blockCache;
-        private final FileChannelCache fileChannelCache;
-
-        TelemetryThread(
-            Pool<RefCountedMemorySegment> pool,
-            BlockCache<RefCountedMemorySegment> blockCache,
-            FileChannelCache fileChannelCache
-        ) {
-            this.pool = pool;
-            this.blockCache = blockCache;
-            this.fileChannelCache = fileChannelCache;
-            this.thread = new Thread(this::run);
-            this.thread.setDaemon(true);
-            this.thread.setName("DirectIOBufferPoolStatsLogger");
-            this.thread.start();
-        }
-
-        private void run() {
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    Thread.sleep(Duration.ofMinutes(5));
-                    publishStats();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    return;
-                } catch (Throwable t) {
-                    LOGGER.warn("Panic in telemetry buffer stats logger", t);
-                }
-            }
-        }
-
-        private void publishStats() {
-            try {
-                pool.recordStats();
-                blockCache.recordStats();
-                if (fileChannelCache != null) {
-                    fileChannelCache.recordStats();
-                }
-            } catch (Exception e) {
-                LOGGER.warn("Failed to log cache/pool stats", e);
-            }
-        }
-
-        @Override
-        public void close() {
-            thread.interrupt();
-            try {
-                thread.join(5000); // Wait up to 5 seconds for graceful shutdown
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
             }
         }
     }
@@ -269,7 +213,7 @@ public final class PoolBuilder {
         double cacheToPoolRatio = PoolSizeCalculator.calculateCacheToPoolRatio(offHeap, settings);
         double warmupPercentage = PoolSizeCalculator.calculateWarmupPercentage(offHeap, settings);
 
-        Pool<RefCountedMemorySegment> segmentPool = new MemorySegmentPool(reservedPoolSizeInBytes, CACHE_BLOCK_SIZE);
+        MemorySegmentPool segmentPool = new MemorySegmentPool(reservedPoolSizeInBytes, CACHE_BLOCK_SIZE);
         LOGGER
             .info(
                 "Creating shared pool with sizeBytes={}, segmentSize={}, totalSegments={}",
@@ -323,8 +267,8 @@ public final class PoolBuilder {
         FileChannelCache fileChannelCache = new FileChannelCache(maxFileChannels, fdCacheExpireSeconds, directOpenOption);
         LOGGER.info("Created shared FileChannel cache: maxOpenFDs={}, expireAfterAccessSeconds={}", maxFileChannels, fdCacheExpireSeconds);
 
-        // Start telemetry
-        TelemetryThread telemetry = new TelemetryThread(segmentPool, blockCache, fileChannelCache);
+        // Gauges read the shared resources on collection; no polling thread
+        Closeable telemetry = PoolGauges.register(segmentPool, blockCache, fileChannelCache);
 
         return new PoolResources(
             segmentPool,

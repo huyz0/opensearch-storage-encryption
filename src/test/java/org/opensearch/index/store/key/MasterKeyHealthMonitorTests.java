@@ -823,4 +823,32 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
             .filter(m -> m.startsWith(prefix))
             .toList();
     }
+
+    public void testEscalationToCriticalIsLoggedOnce() throws Exception {
+        when(mockIndexMetadata.getSettings()).thenReturn(Settings.EMPTY);
+        Logger logger = LogManager.getLogger(MasterKeyHealthMonitor.class);
+        List<LogEvent> events = new CopyOnWriteArrayList<>();
+        try (MockLogAppender appender = MockLogAppender.createForLoggers(logger)) {
+            appender.addExpectation(new MockLogAppender.LoggingExpectation() {
+                @Override
+                public void match(LogEvent event) {
+                    events.add(event.toImmutable());
+                }
+
+                @Override
+                public void assertMatched() {}
+            });
+            monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("ThrottlingException"), FailureType.TRANSIENT);
+            monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("ThrottlingException"), FailureType.TRANSIENT);
+            for (int i = 0; i < 2; i++) {
+                monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, new RuntimeException("DisabledException"), FailureType.CRITICAL);
+            }
+            drainBlockUpdates();
+        }
+
+        List<String> failures = messages(events, Level.WARN, "Can't load the master key");
+        assertEquals(events.toString(), 2, failures.size());
+        assertTrue(failures.get(0), failures.get(0).contains("TRANSIENT failure"));
+        assertTrue(failures.get(1), failures.get(1).contains("CRITICAL failure; the index is blocked"));
+    }
 }

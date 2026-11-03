@@ -346,22 +346,6 @@ public final class CaffeineBlockCache<T, V> implements BlockCache<T> {
     }
 
     @Override
-    public void recordStats() {
-        var stats = cache.stats();
-        CryptoMetricsService
-            .getInstance()
-            .recordCacheStats(
-                cache.estimatedSize(),
-                stats.hitCount(),
-                stats.missCount(),
-                stats.hitRate() * 100,
-                stats.loadCount(),
-                stats.evictionCount(),
-                stats.averageLoadPenalty() / 1_000_000.0  // Convert to ms
-            );
-    }
-
-    @Override
     public double getHitRate() {
         return cache.stats().hitRate();
     }

@@ -124,11 +124,6 @@ public class BlockSlotTinyCacheBenchmarkTests {
         }
 
         @Override
-        public void recordStats() {
-            // No-op for benchmark
-        }
-
-        @Override
         public double getHitRate() {
             return 1.0; // Mock always hits
         }
