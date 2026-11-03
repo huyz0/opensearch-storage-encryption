@@ -263,6 +263,32 @@ if (fipsBuild) {
     // The AWS-LC jars hold a native library for one architecture, so the plugin zip is per architecture.
     tasks.named('bundlePlugin').configure { archiveClassifier = "fips-${accpClassifier}" }
 
+    // AWS-LC FIPS 3.0.0 (FIPS 140-3 validated), built from source for the build host's architecture by
+    // scripts/build-aws-lc-fips.sh, or a prebuilt copy passed with -Paws_lc.library=<path>. The plugin calls it
+    // through the Foreign Function and Memory API (AwsLcFips) and loads it from native/linux-<arch>/ in its directory.
+    def awsLcPlatform = 'linux-' + (System.getProperty('os.arch') in ['aarch64', 'arm64'] ? 'aarch64' : 'x86_64')
+    def awsLcDir = layout.buildDirectory.dir('aws-lc-fips').get()
+    def prebuiltAwsLc = project.findProperty('aws_lc.library')
+    def awsLcLibrary = prebuiltAwsLc ? file(prebuiltAwsLc) : awsLcDir.file("${awsLcPlatform}/libawslc-fips-crypto.so").asFile
+    def buildAwsLcFips = tasks.register('buildAwsLcFips', Exec) {
+        description = 'Builds the AWS-LC FIPS module for the build host'
+        onlyIf { prebuiltAwsLc == null }
+        inputs.file('scripts/build-aws-lc-fips.sh')
+        outputs.file(awsLcLibrary)
+        commandLine 'bash', file('scripts/build-aws-lc-fips.sh').absolutePath, awsLcLibrary.absolutePath, awsLcDir.dir('work').asFile.absolutePath
+    }
+    tasks.named('bundlePlugin').configure {
+        dependsOn buildAwsLcFips
+        from(awsLcLibrary) {
+            into "native/${awsLcPlatform}"
+            rename { 'libawslc-fips-crypto.so' }
+        }
+    }
+    tasks.withType(Test).configureEach {
+        dependsOn buildAwsLcFips
+        systemProperty 'opensearch.storage_encryption.aws_lc.library', awsLcLibrary.absolutePath
+    }
+
     // The security file OpenSearch uses in FIPS mode, and the BCFKS truststore its build tools ship.
     def fipsDir = layout.buildDirectory.dir('fips')
     def prepareFipsTestConfig = tasks.register('prepareFipsTestConfig') {
