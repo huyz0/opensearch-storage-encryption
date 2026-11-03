@@ -298,9 +298,10 @@ public final class BufferIOWithCaching extends OutputStreamIndexOutput {
                 // Lucene writes footer here.
                 // this will also flush the buffer.
 
-                // Seal the last chunk, then write the tag table and the footer
+                // Seal the last chunk, then write the tag table, the footer, and the Lucene footer copy
                 footer.setDataLength(encryptor.finish(out));
                 out.write(footer.serialize(fileKey));
+                out.write(encryptor.luceneFooterCopy());
 
                 // Cache metadata for future reads
                 encryptionMetadataCache.getOrLoadMetadata(normalizedPath, footer, this.masterKey);

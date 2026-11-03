@@ -162,7 +162,7 @@ public class CryptoNIOFSDirectory extends NIOFSDirectory {
         Path path = dirPath.resolve(name);
         long fileSize = super.fileLength(name);
 
-        if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+        if (fileSize < EncryptionMetadataTrailer.MIN_ENCRYPTED_FILE_SIZE) {
             return fileSize;
         }
 

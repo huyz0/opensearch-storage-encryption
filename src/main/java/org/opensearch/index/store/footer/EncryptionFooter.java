@@ -30,7 +30,9 @@ import org.opensearch.index.store.metrics.ErrorType;
 /**
  * Footer of an encrypted index file.
  *
- * <p>File layout: {@code [Ciphertext(DataLength)][ChunkTags(28 * chunkCount)][Footer]}. The data is
+ * <p>File layout: {@code [Ciphertext(DataLength)][ChunkTags(28 * chunkCount)][Footer][LuceneFooterCopy(16)]}.
+ * The last 16 bytes repeat the plaintext's last 16 bytes (Lucene's codec footer) so that core code reading
+ * the raw file, such as {@code Store.readMetadataSnapshot}, can read the checksum. The data is
  * sealed in {@link ChunkCipher} chunks; the tag table holds one {@code nonce || tag} entry per chunk, in order.
  *
  * Footer format: [FooterAuthTag(16)][FooterNonce(12)][DataLength(8)][ChunkSize(4)][MessageId(16)][KeyMetadata(0)]
@@ -87,9 +89,9 @@ public class EncryptionFooter {
         return footerLength;
     }
 
-    /** Bytes after the data: the chunk tag table plus the footer. */
+    /** Bytes after the data: the chunk tag table, the footer, and the Lucene footer copy. */
     public long getTrailerLength() {
-        return ChunkCipher.tagTableLength(dataLength) + footerLength;
+        return ChunkCipher.tagTableLength(dataLength) + footerLength + EncryptionMetadataTrailer.LUCENE_FOOTER_COPY_SIZE;
     }
 
     public byte[] serialize(byte[] fileKey) throws IOException {
@@ -351,13 +353,14 @@ public class EncryptionFooter {
         }
 
         long fileSize = channel.size();
-        if (fileSize < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
+        if (fileSize < EncryptionMetadataTrailer.MIN_ENCRYPTED_FILE_SIZE) {
             throw new NotOSEFFileException("File too small to contain encryption footer: " + normalizedFilePath);
         }
 
-        // Read MAX_FOOTER_READ_SIZE or entire file if smaller
-        int readSize = (int) Math.min(MAX_FOOTER_READ_SIZE, fileSize);
-        long readPosition = fileSize - readSize;
+        // The OSEF footer ends just before the Lucene footer copy. Read up to MAX_FOOTER_READ_SIZE bytes ending there.
+        long footerEnd = fileSize - EncryptionMetadataTrailer.LUCENE_FOOTER_COPY_SIZE;
+        int readSize = (int) Math.min(MAX_FOOTER_READ_SIZE, footerEnd);
+        long readPosition = footerEnd - readSize;
 
         ByteBuffer buffer = ByteBuffer.allocate(readSize);
         int bytesRead = channel.read(buffer, readPosition);

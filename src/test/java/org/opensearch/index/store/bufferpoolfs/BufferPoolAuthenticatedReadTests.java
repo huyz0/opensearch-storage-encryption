@@ -39,6 +39,7 @@ import org.opensearch.index.store.cipher.ChunkCipher;
 import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.cipher.EncryptionMetadataCacheRegistry;
+import org.opensearch.index.store.footer.EncryptionMetadataTrailer;
 import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.index.store.niofs.CryptoNIOFSDirectory;
 import org.opensearch.index.store.pool.Pool;
@@ -218,8 +219,9 @@ public class BufferPoolAuthenticatedReadTests extends OpenSearchTestCase {
         write("_7.tim", randomByteArrayOfLength(CHUNK + 10));
         Path file = path.resolve("_7.tim");
         long size = java.nio.file.Files.size(file);
-        // Flip a bit in the authenticated part of the footer (DataLength..Magic, after the auth tag).
-        flipBit("_7.tim", size - randomIntBetween(1, 40));
+        // Flip a bit in the authenticated part of the footer (DataLength..Magic, after the auth tag),
+        // which ends just before the unauthenticated Lucene footer copy.
+        flipBit("_7.tim", size - EncryptionMetadataTrailer.LUCENE_FOOTER_COPY_SIZE - randomIntBetween(1, 40));
         encryptionMetadataCache.invalidateFile(EncryptionMetadataCache.normalizePath(file));
         expectThrows(IOException.class, () -> loader.load(file, 0, 1, 1000));
     }

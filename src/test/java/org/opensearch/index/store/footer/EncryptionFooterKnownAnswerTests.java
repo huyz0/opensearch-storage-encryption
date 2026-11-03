@@ -31,7 +31,7 @@ import org.opensearch.test.OpenSearchTestCase;
 /**
  * Known-answer tests for the OSEF footer and a committed golden encrypted file.
  *
- * <p>{@code golden-v3.osef} and every expected value here were produced by
+ * <p>{@code golden-v4.osef} and every expected value here were produced by
  * src/test/resources/org/opensearch/index/store/golden/generate_golden_vectors.py, which
  * implements the format without any plugin code. If one of these tests fails, the on-disk
  * format has changed: files written by earlier builds will not be readable by this one.
@@ -41,7 +41,7 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
     private static final byte[] MASTER_KEY = hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
     private static final byte[] MESSAGE_ID = hex("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf");
     private static final byte[] FILE_KEY = hex("7880842664260e88ad71ee04d9f889fe1d13efe0d86041d1dab05d7a02e8d786");
-    private static final String GOLDEN_FILE = "/org/opensearch/index/store/golden/golden-v3.osef";
+    private static final String GOLDEN_FILE = "/org/opensearch/index/store/golden/golden-v4.osef";
     /** Two full 8 KiB chunks and a 3616-byte tail. */
     private static final int GOLDEN_PLAINTEXT_LENGTH = 20000;
     /** One {@code nonce || tag} entry per chunk. */
@@ -112,7 +112,7 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
         EncryptionFooter footer = EncryptionFooter.deserialize(GOLDEN_FOOTER, FILE_KEY);
         assertArrayEquals(MESSAGE_ID, footer.getMessageId());
         assertEquals(GOLDEN_PLAINTEXT_LENGTH, footer.getDataLength());
-        assertEquals(3 * 28 + GOLDEN_FOOTER.length, footer.getTrailerLength());
+        assertEquals(3 * 28 + GOLDEN_FOOTER.length + 16, footer.getTrailerLength());
         assertEquals(1, footer.getAlgorithmId());
         assertEquals(GOLDEN_FOOTER.length, footer.getFooterLength());
         assertEquals(0, footer.getKeyMetadata().length);
@@ -136,16 +136,22 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
     public void testGoldenFileLayout() throws Exception {
         byte[] file = Files.readAllBytes(getDataPath(GOLDEN_FILE));
         byte[] tagTable = hex(GOLDEN_TAG_TABLE_HEX);
-        assertEquals(GOLDEN_PLAINTEXT_LENGTH + tagTable.length + GOLDEN_FOOTER.length, file.length);
+        int copy = EncryptionMetadataTrailer.LUCENE_FOOTER_COPY_SIZE;
+        assertEquals(16, copy);
+        assertEquals(GOLDEN_PLAINTEXT_LENGTH + tagTable.length + GOLDEN_FOOTER.length + copy, file.length);
         assertArrayEquals(tagTable, Arrays.copyOfRange(file, GOLDEN_PLAINTEXT_LENGTH, GOLDEN_PLAINTEXT_LENGTH + tagTable.length));
-        assertArrayEquals(GOLDEN_FOOTER, Arrays.copyOfRange(file, file.length - GOLDEN_FOOTER.length, file.length));
-        int trailerStart = file.length - EncryptionMetadataTrailer.MIN_FOOTER_SIZE;
-        assertEquals(GOLDEN_FOOTER.length, EncryptionFooter.calculateFooterLength(file, trailerStart));
+        int footerEnd = file.length - copy;
+        assertArrayEquals(GOLDEN_FOOTER, Arrays.copyOfRange(file, footerEnd - GOLDEN_FOOTER.length, footerEnd));
+        // The golden plaintext does not end with a Lucene codec footer, so the copy is all zeros.
+        assertArrayEquals(new byte[copy], Arrays.copyOfRange(file, footerEnd, file.length));
+        byte[] upToFooterEnd = Arrays.copyOf(file, footerEnd);
+        int trailerStart = footerEnd - EncryptionMetadataTrailer.MIN_FOOTER_SIZE;
+        assertEquals(GOLDEN_FOOTER.length, EncryptionFooter.calculateFooterLength(upToFooterEnd, trailerStart));
     }
 
     /**
      * Reads the committed golden file through {@link CryptoNIOFSDirectory}. This is the
-     * format check: today's reader must decrypt and authenticate a file in the v3 format.
+     * format check: today's reader must decrypt and authenticate a file in the v4 format.
      */
     public void testReadGoldenFileThroughDirectory() throws Exception {
         Path dir = createTempDir();

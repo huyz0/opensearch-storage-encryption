@@ -46,6 +46,18 @@ public class EncryptionMetadataTrailer {
     public static final int MIN_FOOTER_SIZE = FIXED_FOOTER_SIZE + DATA_LENGTH_SIZE + CHUNK_SIZE_SIZE + FOOTER_AUTH_TAG_SIZE
         + FOOTER_NONCE_SIZE;
 
+    /**
+     * Bytes after the footer: a plaintext copy of the last 16 plaintext bytes of the file, which for every
+     * Lucene index file is its codec footer (magic, algorithm ID, CRC32 of the plaintext). OpenSearch core
+     * reads store metadata of a closed shard with a plain {@code NIOFSDirectory} and takes each file's
+     * checksum from its last 16 bytes ({@code CodecUtil.retrieveChecksum}), so the copy lets that read work
+     * on encrypted files. It is not authenticated and the plugin's own readers ignore it.
+     */
+    public static final int LUCENE_FOOTER_COPY_SIZE = 16;
+
+    /** Smallest possible encrypted file: an empty file's footer plus the Lucene footer copy. */
+    public static final int MIN_ENCRYPTED_FILE_SIZE = MIN_FOOTER_SIZE + LUCENE_FOOTER_COPY_SIZE;
+
     // Algorithm IDs for future extensibility
     public static final int ALGORITHM_AES_256_GCM = 1;
 
