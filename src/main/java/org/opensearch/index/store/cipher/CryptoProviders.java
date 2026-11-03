@@ -36,7 +36,7 @@ import org.apache.logging.log4j.Logger;
  * <ul>
  *   <li>The default build uses only JCE and loads no native code. It runs in either mode.</li>
  *   <li>The FIPS build ({@code -Pcrypto.standard=FIPS-140-3}) bundles the AWS-LC FIPS module ({@link AwsLcFips})
- *       and uses it directly for AES-GCM, AES-CTR and key derivation; JCE only for the rest. It refuses to start
+ *       and uses it directly for AES-GCM, AES-CTR, key derivation and random numbers; JCE only for the rest. It refuses to start
  *       on a node that is not in FIPS mode, or if AWS-LC cannot be loaded.</li>
  * </ul>
  *
@@ -60,11 +60,8 @@ public final class CryptoProviders {
     private CryptoProviders() {}
 
     /** What was chosen for this JVM. */
-    private record Resolved(Provider provider, AwsLcFips awsLc, boolean fips) {
+    private record Resolved(Provider provider, SecureRandom random, AwsLcFips awsLc, boolean fips) {
     }
-
-    /** Random source shared by message IDs and translog nonces, from the JVM's default order. */
-    private static final SecureRandom RANDOM = new SecureRandom();
 
     /** Nonce source for JCE sealing: one per thread, so parallel writers do not contend on a shared generator. */
     private static final ThreadLocal<SecureRandom> NONCE_RANDOM = ThreadLocal.withInitial(SecureRandom::new);
@@ -114,10 +111,12 @@ public final class CryptoProviders {
         return NONCE_RANDOM.get();
     }
 
-    /** Returns a shared random source from the JVM's default order, for message IDs and translog nonces. */
+    /**
+     * Returns a shared random source for message IDs and translog nonces: the AWS-LC FIPS module's DRBG when
+     * {@link #awsLc()} is loaded (with no JCE fallback), otherwise one from the JVM's default order.
+     */
     public static SecureRandom secureRandom() {
-        resolve();
-        return RANDOM;
+        return resolve().random;
     }
 
     /** Whether the node runs in FIPS approved-only mode. */
@@ -153,13 +152,13 @@ public final class CryptoProviders {
         }
         LOGGER
             .info(
-                "storage encryption uses [{}] for AES-GCM, AES-CTR and key derivation; JCE providers from the JVM's order: "
+                "storage encryption uses [{}] for AES-GCM, AES-CTR, key derivation and random numbers; JCE providers from the JVM's order: "
                     + "AES-GCM [{}], AES-CTR [{}], HmacSHA384 [{}], SecureRandom [{}] (FIPS mode: {}, crypto.standard: {})",
                 r.awsLc != null ? r.awsLc.version() + " (" + r.awsLc.library() + ")" : "JCE",
                 gcm,
                 ctr,
                 hmac,
-                RANDOM.getProvider().getName(),
+                r.random.getProvider().getName(),
                 r.fips,
                 isFipsBuild() ? FIPS_140_3 : "any-supported"
             );
@@ -180,7 +179,9 @@ public final class CryptoProviders {
                         throw new IllegalStateException("no installed JCE provider offers AES/GCM/NoPadding", e);
                     }
                     AwsLcFips awsLc = isFipsBuild() ? loadAwsLc() : null;
-                    r = new Resolved(provider, awsLc, fips);
+                    // With AWS-LC loaded, message IDs and translog nonces come from its DRBG, with no JCE fallback.
+                    SecureRandom random = awsLc != null ? awsLc.secureRandom() : new SecureRandom();
+                    r = new Resolved(provider, random, awsLc, fips);
                     resolved = r;
                 }
             }

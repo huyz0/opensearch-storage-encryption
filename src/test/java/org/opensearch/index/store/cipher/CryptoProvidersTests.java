@@ -4,7 +4,9 @@
  */
 package org.opensearch.index.store.cipher;
 
+import java.security.SecureRandom;
 import java.security.Security;
+import java.util.Arrays;
 
 import javax.crypto.Cipher;
 
@@ -43,11 +45,19 @@ public class CryptoProvidersTests extends OpenSearchTestCase {
         assertEquals(CryptoProviders.isFipsBuild(), CryptoProviders.isApprovedOnlyMode());
         assertEquals(CryptoProviders.isFipsBuild(), CryptoProviders.isFipsMode());
         if (CryptoProviders.isFipsBuild()) {
-            // The FIPS build bundles the AWS-LC FIPS module for AES-GCM, AES-CTR and the KDF; JCE (BCFIPS first) does the rest.
+            // The FIPS build bundles the AWS-LC FIPS module for AES-GCM, AES-CTR, the KDF and the DRBG; JCE (BCFIPS first)
+            // does the rest.
             assertNotNull("the bundled AWS-LC FIPS module did not load", CryptoProviders.awsLc());
             assertEquals(AwsLcFips.EXPECTED_VERSION, CryptoProviders.awsLc().version());
             assertEquals(CryptoProviders.FIPS_PROVIDER, CryptoProviders.provider().getName());
-            assertEquals(CryptoProviders.FIPS_PROVIDER, CryptoProviders.secureRandom().getProvider().getName());
+            SecureRandom random = CryptoProviders.secureRandom();
+            assertEquals("AWS-LC-FIPS", random.getProvider().getName());
+            assertEquals("AWS-LC-FIPS-DRBG", random.getAlgorithm());
+            byte[] a = new byte[16];
+            byte[] b = new byte[16];
+            random.nextBytes(a);
+            random.nextBytes(b);
+            assertFalse(Arrays.equals(a, b));
         } else {
             assertNull(CryptoProviders.awsLc());
         }
