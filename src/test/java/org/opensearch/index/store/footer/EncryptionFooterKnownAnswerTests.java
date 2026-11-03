@@ -52,7 +52,7 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
     /**
      * Footer of the golden file, no key metadata. Big-endian fields, in order:
      * <pre>
-     * FooterAuthTag      5f4478bf35b31125564aaabf113dfd55  GCM tag over the rest of the footer (as AAD)
+     * FooterAuthTag      4d638b7bc985e5fc1003c4f493f51fde  GCM tag, AAD = the footer after the nonce
      * FooterNonce        139921a957eb2c01734a97b6          GCM nonce of the auth tag (random when written)
      * DataLength         0000000000004e20                  20000
      * ChunkSize          00002000                          8192
@@ -64,7 +64,7 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
      * </pre>
      */
     private static final byte[] GOLDEN_FOOTER = hex(
-        "5f4478bf35b31125564aaabf113dfd55"
+        "4d638b7bc985e5fc1003c4f493f51fde"
             + "139921a957eb2c01734a97b6"
             + "0000000000004e20"
             + "00002000"

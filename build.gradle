@@ -239,12 +239,6 @@ def generateCryptoStandard = tasks.register('generateCryptoStandard') {
 }
 sourceSets.main.resources.srcDir(files(generatedBuildInfo).builtBy(generateCryptoStandard))
 
-// AWS-LC ships one jar per architecture: -Paccp.classifier=linux-x86_64|linux-aarch_64, default the build host's.
-def accpVersion = '2.5.0'
-def accpClassifier = (project.findProperty('accp.classifier') ?: (
-    System.getProperty('os.arch') in ['aarch64', 'arm64'] ? 'linux-aarch_64' : 'linux-x86_64'
-)).toString()
-
 if (fipsBuild) {
     configurations {
         fipsJars { canBeConsumed = false; canBeResolved = true; transitive = false }
@@ -256,19 +250,18 @@ if (fipsBuild) {
         fipsJars "org.bouncycastle:bc-fips:${versions.bouncycastle_jce}"
         fipsJars "org.bouncycastle:bctls-fips:${versions.bouncycastle_tls}"
         fipsJars "org.bouncycastle:bcutil-fips:${versions.bouncycastle_util}"
-        // AWS-LC FIPS module (Amazon Corretto Crypto Provider, FIPS build). The plugin prefers it in FIPS mode
-        // for AES-GCM, HMAC, key derivation and the DRBG; it has no AES-CTR, so the translog stays on BC-FIPS.
-        implementation "software.amazon.cryptools:AmazonCorrettoCryptoProvider-FIPS:${accpVersion}:${accpClassifier}"
     }
-    // The AWS-LC jars hold a native library for one architecture, so the plugin zip is per architecture.
-    tasks.named('bundlePlugin').configure { archiveClassifier = "fips-${accpClassifier}" }
 
-    // AWS-LC FIPS 3.0.0 (FIPS 140-3 validated), built from source for the build host's architecture by
-    // scripts/build-aws-lc-fips.sh, or a prebuilt copy passed with -Paws_lc.library=<path>. The plugin calls it
-    // through the Foreign Function and Memory API (AwsLcFips) and loads it from native/linux-<arch>/ in its directory.
+    // AWS-LC FIPS 3.0.0 (FIPS 140-3 validated). The plugin calls it through the Foreign Function and Memory API
+    // (AwsLcFips) and loads it from native/linux-<arch>/libawslc-fips-crypto.so in its directory.
+    //  - default: built from source for the build host by scripts/build-aws-lc-fips.sh; zip classifier fips-linux-<arch>
+    //  - -Paws_lc.library=<path>: a prebuilt library for the build host instead
+    //  - -Paws_lc.libraries=<dir>: prebuilt <dir>/linux-<arch>/libawslc-fips-crypto.so for every architecture (CI
+    //    builds them in almalinux:8); one zip for all of them, classifier fips
     def awsLcPlatform = 'linux-' + (System.getProperty('os.arch') in ['aarch64', 'arm64'] ? 'aarch64' : 'x86_64')
     def awsLcDir = layout.buildDirectory.dir('aws-lc-fips').get()
-    def prebuiltAwsLc = project.findProperty('aws_lc.library')
+    def awsLcLibraries = project.findProperty('aws_lc.libraries')
+    def prebuiltAwsLc = project.findProperty('aws_lc.library') ?: (awsLcLibraries ? "${awsLcLibraries}/${awsLcPlatform}/libawslc-fips-crypto.so" : null)
     def awsLcLibrary = prebuiltAwsLc ? file(prebuiltAwsLc) : awsLcDir.file("${awsLcPlatform}/libawslc-fips-crypto.so").asFile
     def buildAwsLcFips = tasks.register('buildAwsLcFips', Exec) {
         description = 'Builds the AWS-LC FIPS module for the build host'
@@ -279,9 +272,18 @@ if (fipsBuild) {
     }
     tasks.named('bundlePlugin').configure {
         dependsOn buildAwsLcFips
-        from(awsLcLibrary) {
-            into "native/${awsLcPlatform}"
-            rename { 'libawslc-fips-crypto.so' }
+        if (awsLcLibraries) {
+            from(file(awsLcLibraries)) {
+                into 'native'
+                include 'linux-x86_64/libawslc-fips-crypto.so', 'linux-aarch64/libawslc-fips-crypto.so'
+            }
+            archiveClassifier = 'fips'
+        } else {
+            from(awsLcLibrary) {
+                into "native/${awsLcPlatform}"
+                rename { 'libawslc-fips-crypto.so' }
+            }
+            archiveClassifier = "fips-${awsLcPlatform}"
         }
     }
     tasks.withType(Test).configureEach {

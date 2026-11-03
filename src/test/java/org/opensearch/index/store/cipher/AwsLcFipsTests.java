@@ -166,7 +166,7 @@ public class AwsLcFipsTests extends OpenSearchTestCase {
         byte[] iv = randomByteArrayOfLength(16);
         iv[15] = (byte) 0xfe; // cross a counter-byte carry
         byte[] plain = randomByteArrayOfLength(4096);
-        Cipher jce = Cipher.getInstance("AES/CTR/NoPadding", CryptoProviders.ctrProvider());
+        Cipher jce = Cipher.getInstance("AES/CTR/NoPadding", CryptoProviders.provider());
         jce.init(Cipher.ENCRYPT_MODE, key, new IvParameterSpec(iv));
         byte[] expected = jce.doFinal(plain);
         for (int i = 0; i < 100; i++) {

@@ -4,6 +4,7 @@
  */
 package org.opensearch.index.store.cipher;
 
+import java.lang.foreign.MemorySegment;
 import java.nio.ByteBuffer;
 import java.security.GeneralSecurityException;
 import java.security.Key;
@@ -17,8 +18,8 @@ import javax.crypto.spec.GCMParameterSpec;
  *
  * <p>The plaintext of a file is split into {@link #CHUNK_SIZE} chunks (the last one may be shorter).
  * Chunk {@code i} is sealed on its own with the file key, a random 12-byte nonce that the
- * {@linkplain CryptoProviders#sealProvider() seal provider} generates (inside the cryptographic module in
- * FIPS mode), and the AAD {@code i} (big-endian {@code long}). The
+ * cryptographic module generates (in FIPS mode the bundled AWS-LC FIPS module, see {@link AwsLcFips}, or
+ * Bouncy Castle FIPS if it is not available), and the AAD {@code i} (big-endian {@code long}). The
  * ciphertext has the same length as the plaintext, so a plaintext offset is also the ciphertext offset.
  * Each chunk's {@link #ENTRY_LENGTH}-byte entry, {@code nonce || tag}, is stored separately in the file's
  * tag table. A reader decrypts and verifies one whole chunk at a time, so any change to the ciphertext,
@@ -72,9 +73,9 @@ public final class ChunkCipher {
 
     private ChunkCipher() {}
 
-    /** Returns a new AES/GCM cipher for {@link #seal}, from {@link CryptoProviders#sealProvider()}. Writers keep their own instance. */
+    /** Returns a new AES/GCM cipher for {@link #seal}, from {@link CryptoProviders#provider()}. Writers keep their own instance. */
     public static Cipher newCipher() {
-        return newCipher(CryptoProviders.sealProvider());
+        return newCipher(CryptoProviders.provider());
     }
 
     private static Cipher newCipher(java.security.Provider provider) {
@@ -133,6 +134,20 @@ public final class ChunkCipher {
     public static void seal(Cipher cipher, Key key, long chunkIndex, byte[] in, int inOffset, int length, byte[] out)
         throws GeneralSecurityException {
         checkLength(length);
+        AwsLcFips awsLc = CryptoProviders.awsLc();
+        if (awsLc != null) {
+            // FIPS mode: the AWS-LC FIPS module generates the nonce inside the module.
+            MemorySegment o = MemorySegment.ofArray(out);
+            awsLc
+                .seal(
+                    key,
+                    MemorySegment.ofArray(aad(chunkIndex, new byte[AAD_LENGTH])),
+                    MemorySegment.ofArray(in).asSlice(inOffset, length),
+                    o.asSlice(0, length),
+                    o.asSlice(length, ENTRY_LENGTH)
+                );
+            return;
+        }
         // No IV given: the provider generates a random one (in FIPS mode inside the module, with its DRBG).
         cipher.init(Cipher.ENCRYPT_MODE, key, CryptoProviders.nonceRandom());
         sealInitialized(cipher, chunkIndex, in, inOffset, length, out);
@@ -185,6 +200,23 @@ public final class ChunkCipher {
             throw new IllegalArgumentException("out has " + out.remaining() + " bytes left, chunk needs " + length);
         }
         OpenScratch scratch = OPEN_SCRATCH.get();
+        AwsLcFips awsLc = CryptoProviders.awsLc();
+        if (awsLc != null) {
+            // Decrypt into scratch so nothing reaches out unless the chunk authenticates.
+            MemorySegment plaintext = MemorySegment.ofArray(scratch.plaintext).asSlice(0, length);
+            awsLc
+                .open(
+                    key,
+                    MemorySegment.ofArray(aad(chunkIndex, scratch.aad)),
+                    MemorySegment.ofBuffer(ciphertext),
+                    MemorySegment.ofBuffer(entry),
+                    plaintext
+                );
+            ciphertext.position(ciphertext.limit());
+            entry.position(entry.limit());
+            out.put(scratch.plaintext, 0, length);
+            return;
+        }
         ciphertext.get(scratch.sealed, 0, length);
         entry.get(scratch.nonce);
         entry.get(scratch.sealed, length, TAG_LENGTH);

@@ -12,6 +12,7 @@ import java.util.Arrays;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
+import org.opensearch.index.store.cipher.AwsLcFips;
 import org.opensearch.index.store.cipher.CryptoProviders;
 
 /**
@@ -27,8 +28,8 @@ import org.opensearch.index.store.cipher.CryptoProviders;
  * {@code "file-encryption"}), {@code Context} the 16-byte message ID and {@code L} the output length
  * in bits. SP 800-108 is the NIST-approved way to derive keys from a key (SP 800-133r2, 6.3).
  *
- * <p>In FIPS mode the derivation runs inside the validated module: the AWS-LC FIPS module's
- * {@code CounterKdfWithHmacSHA384} when the plugin runs on AWS-LC, otherwise Bouncy Castle FIPS's
+ * <p>In FIPS mode the derivation runs inside the validated module: the bundled AWS-LC FIPS module's
+ * {@code KBKDF_ctr_hmac} ({@link AwsLcFips}), otherwise Bouncy Castle FIPS's
  * {@code FipsKDF} counter mode; each is an approved service of its module. Outside FIPS mode it is
  * computed here with the JCE HMAC. All three give the same bytes.
  *
@@ -62,9 +63,11 @@ public final class KeyDerivation {
         }
         byte[] fixedInput = fixedInput(label.getBytes(StandardCharsets.UTF_8), messageId, keyLength);
         if (CryptoProviders.isFipsMode()) {
-            return CryptoProviders.isAwsLc()
-                ? AwsLcKeyDerivation.counterModeHmacSha384(masterKey, fixedInput, keyLength)
-                : FipsKeyDerivation.counterModeHmacSha384(masterKey, fixedInput, keyLength);
+            AwsLcFips awsLc = CryptoProviders.awsLc();
+            if (awsLc != null) {
+                return awsLc.kbkdfHmacSha384(masterKey, fixedInput, keyLength);
+            }
+            return FipsKeyDerivation.counterModeHmacSha384(masterKey, fixedInput, keyLength);
         }
         return counterModeHmacSha384(masterKey, fixedInput, keyLength);
     }
