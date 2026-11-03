@@ -14,7 +14,6 @@ import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.crypto.Cipher;
-import javax.crypto.Mac;
 import javax.crypto.MacSpi;
 
 import org.opensearch.test.OpenSearchTestCase;
