@@ -23,6 +23,10 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.core.LogEvent;
 import org.junit.After;
 import org.junit.Before;
 import org.mockito.ArgumentCaptor;
@@ -40,6 +44,7 @@ import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.core.action.ActionListener;
 import org.opensearch.index.store.key.MasterKeyHealthMonitor.FailureState;
+import org.opensearch.test.MockLogAppender;
 import org.opensearch.test.OpenSearchTestCase;
 import org.opensearch.transport.client.AdminClient;
 import org.opensearch.transport.client.Client;
@@ -755,5 +760,67 @@ public class MasterKeyHealthMonitorTests extends OpenSearchTestCase {
         assertTrue(
             MasterKeyHealthMonitor.INDEX_HEALTH_MONITOR_BLOCKS_SETTING.getProperties().contains(Setting.Property.NotCopyableOnResize)
         );
+    }
+
+    public void testFirstFailureLoggedOnceWithCauseAndRecoveryLogged() throws Exception {
+        when(mockIndexMetadata.getSettings()).thenReturn(Settings.EMPTY);
+        Logger logger = LogManager.getLogger(MasterKeyHealthMonitor.class);
+        List<LogEvent> events = new CopyOnWriteArrayList<>();
+        try (MockLogAppender appender = MockLogAppender.createForLoggers(logger)) {
+            appender.addExpectation(new MockLogAppender.LoggingExpectation() {
+                @Override
+                public void match(LogEvent event) {
+                    events.add(event.toImmutable());
+                }
+
+                @Override
+                public void assertMatched() {}
+            });
+            Exception cause = new RuntimeException("wrapper", new RuntimeException("DisabledException: key arn:aws:kms:k is disabled"));
+            for (int i = 0; i < 3; i++) {
+                monitor.reportFailure(TEST_INDEX_UUID, TEST_INDEX_NAME, cause, FailureType.CRITICAL);
+            }
+            drainBlockUpdates();
+            monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
+            drainBlockUpdates();
+        }
+
+        List<String> failures = messages(events, Level.WARN, "Can't load the master key");
+        assertEquals(events.toString(), 1, failures.size());
+        assertTrue(failures.get(0), failures.get(0).contains("[" + TEST_INDEX_NAME + "]"));
+        assertTrue(failures.get(0), failures.get(0).contains("CRITICAL failure; the index is blocked"));
+        assertTrue(
+            "root cause, not the wrapper: " + failures.get(0),
+            failures.get(0).endsWith("DisabledException: key arn:aws:kms:k is disabled")
+        );
+        // The mocked index settings never show the block, so each critical failure re-applies it
+        assertFalse(events.toString(), messages(events, Level.WARN, "Applied write block to index " + TEST_INDEX_NAME).isEmpty());
+        assertEquals(
+            events.toString(),
+            1,
+            messages(events, Level.INFO, "Master key for index [" + TEST_INDEX_NAME + "] loads again").size()
+        );
+    }
+
+    public void testRecoveryNotLoggedWithoutFailure() throws Exception {
+        Logger logger = LogManager.getLogger(MasterKeyHealthMonitor.class);
+        try (MockLogAppender appender = MockLogAppender.createForLoggers(logger)) {
+            appender
+                .addExpectation(
+                    new MockLogAppender.UnseenEventExpectation("no recovery line", logger.getName(), Level.INFO, "*loads again*")
+                );
+            monitor.reportSuccess(TEST_INDEX_UUID, TEST_INDEX_NAME);
+            drainBlockUpdates();
+            appender.assertAllExpectationsMatched();
+        }
+    }
+
+    private static List<String> messages(List<LogEvent> events, Level level, String prefix) {
+        return events
+            .stream()
+            .filter(e -> e.getLevel() == level)
+            .map(e -> e.getMessage().getFormattedMessage())
+            .filter(m -> m.startsWith(prefix))
+            .toList();
     }
 }

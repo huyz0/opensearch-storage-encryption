@@ -178,6 +178,7 @@ public class CryptoNIOFSAuthenticatedReadTests extends OpenSearchTestCase {
         try (Directory d = openDirectory(otherKey)) {
             CorruptIndexException e = expectThrows(CorruptIndexException.class, () -> d.openInput(FILE, IOContext.DEFAULT));
             assertEquals("Footer authentication failed", e.getOriginalMessage());
+            assertTrue("names the file: " + e.getMessage(), e.getMessage().contains(FILE));
         }
     }
 

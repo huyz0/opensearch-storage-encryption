@@ -165,6 +165,15 @@ public class EncryptionFooter {
     }
 
     public static EncryptionFooter deserialize(byte[] fileBytes, byte[] fileKey) throws IOException {
+        return deserialize(fileBytes, fileKey, "encryption footer");
+    }
+
+    /**
+     * Parses and authenticates a footer.
+     *
+     * @param resourceDescription names the file in a {@link CorruptIndexException}, so an operator can find it
+     */
+    public static EncryptionFooter deserialize(byte[] fileBytes, byte[] fileKey, String resourceDescription) throws IOException {
         if (fileBytes.length < EncryptionMetadataTrailer.MIN_FOOTER_SIZE) {
             throw new IOException("Invalid footer size: " + fileBytes.length);
         }
@@ -175,7 +184,7 @@ public class EncryptionFooter {
 
         // Verify auth tag
         if (!verifyFooterAuthTag(fileKey, footerData, authTag)) {
-            throw new CorruptIndexException("Footer authentication failed", "encryption footer");
+            throw new CorruptIndexException("Footer authentication failed", resourceDescription);
         }
 
         int pos = footerData.length;
@@ -391,7 +400,7 @@ public class EncryptionFooter {
         byte[] fileKey = KeyDerivation.deriveFileKey(masterKey, messageId);
 
         // Deserialize footer with file key for authentication
-        EncryptionFooter footer = deserialize(footerBytes, fileKey);
+        EncryptionFooter footer = deserialize(footerBytes, fileKey, normalizedFilePath);
 
         // DataLength is authenticated, so this catches truncated or extended files
         long expectedFileSize = footer.getDataLength() + footer.getTrailerLength();

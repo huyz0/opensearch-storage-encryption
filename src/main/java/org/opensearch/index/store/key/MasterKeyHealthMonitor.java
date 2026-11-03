@@ -16,6 +16,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -116,6 +117,8 @@ public class MasterKeyHealthMonitor {
         volatile FailureType failureType;
         volatile boolean blocksApplied = false;
         volatile boolean readBlockScheduled = false;
+        // Set once the first failure of this episode has been logged; a recovery drops the state
+        final AtomicBoolean failureLogged = new AtomicBoolean();
 
         FailureState(Exception exception, FailureType failureType) {
             this.lastFailureTimeMillis = new AtomicLong(System.currentTimeMillis());
@@ -230,12 +233,45 @@ public class MasterKeyHealthMonitor {
         if (existing != null) {
             state.recordFailure(exception, failureType);
         }
+        logFirstFailure(indexName != null ? indexName : indexUuid, state, exception, failureType, false);
 
         // Only apply blocks for CRITICAL errors with valid index name. This also re-asserts them on later
         // critical failures: blocks are cluster-wide, so another node that recovered may have removed them.
         if (failureType == FailureType.CRITICAL && indexName != null) {
             queueApplyBlocks(indexUuid, indexName, state);
             state.blocksApplied = true;
+        }
+    }
+
+    /**
+     * Logs the first failure of an episode at WARN, so an operator can see why an index is (or will be)
+     * blocked. Later failures in the same episode are not logged again; a recovery ends the episode.
+     */
+    private void logFirstFailure(String indexName, FailureState state, Exception e, FailureType failureType, boolean keyInCache) {
+        if (state.failureLogged.compareAndSet(false, true) == false) {
+            return;
+        }
+        String impact;
+        if (failureType != FailureType.CRITICAL) {
+            impact = "transient, will retry without blocking the index";
+        } else if (keyInCache) {
+            impact = "the cached key keeps the index usable until it expires, then the index is blocked";
+        } else {
+            impact = "the index is blocked until the key loads again";
+        }
+        logger
+            .warn(
+                "Can't load the master key for index [{}] ({} failure; {}): {}",
+                indexName,
+                failureType,
+                impact,
+                KeyCacheException.extractRootCauseMessage(e)
+            );
+    }
+
+    private void logRecovery(String indexName, FailureState previous) {
+        if (previous != null && previous.failureLogged.get()) {
+            logger.info("Master key for index [{}] loads again", indexName);
         }
     }
 
@@ -250,7 +286,7 @@ public class MasterKeyHealthMonitor {
      * @param indexName the index name
      */
     public void reportSuccess(String indexUuid, String indexName) {
-        failureTracker.remove(indexUuid);
+        logRecovery(indexName, failureTracker.remove(indexUuid));
         queueRemoveOwnedBlocks(indexUuid, indexName);
     }
 
@@ -388,7 +424,7 @@ public class MasterKeyHealthMonitor {
             Settings update = Settings.builder().put(blockKey, true).putList(INDEX_HEALTH_MONITOR_BLOCKS_SETTING.getKey(), owned).build();
             // Async: don't wait for cluster state update
             client.admin().indices().updateSettings(new UpdateSettingsRequest(update, indexName));
-            logger.info("Applied {} block to index {}", block, indexName);
+            logger.warn("Applied {} block to index {}: its master key can't be loaded from the key provider", block, indexName);
         } catch (Exception e) {
             logger.error("Failed to apply {} block to index {}: {}", block, indexName, e.getMessage(), e);
         }
@@ -569,7 +605,7 @@ public class MasterKeyHealthMonitor {
                         if (keyRecovered) {
                             // Remove only the blocks the monitor applied (recorded in the index settings, so
                             // this also cleans up after a restart); blocks set by others are kept
-                            failureTracker.remove(indexUuid);
+                            logRecovery(indexName, failureTracker.remove(indexUuid));
                             if (INDEX_HEALTH_MONITOR_BLOCKS_SETTING.get(indexSettingsOrEmpty(indexName)).isEmpty() == false) {
                                 recoveredCount++;
                             }
@@ -600,6 +636,7 @@ public class MasterKeyHealthMonitor {
 
                     FailureState newState = new FailureState(e, failureType);
                     FailureState state = failureTracker.putIfAbsent(indexUuid, newState);
+                    logFirstFailure(indexName, state == null ? newState : state, e, failureType, keyInCache);
                     if (state == null) {
                         state = newState;
 
