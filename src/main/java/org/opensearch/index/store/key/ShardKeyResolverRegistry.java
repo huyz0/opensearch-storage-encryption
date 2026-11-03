@@ -187,6 +187,32 @@ public class ShardKeyResolverRegistry {
      * @return any KeyResolver for this index, or null if no shards exist on this node
      */
     public static KeyResolver getAnyResolverForIndex(String indexUuid) {
+        return getAnyResolverForIndexImpl(indexUuid);
+    }
+
+    /**
+     * Finds the name of the index a shard file belongs to, from the index UUID in its path
+     * ({@code .../indices/<index uuid>/<shard>/index/<file>}). Meant for error reporting, not hot paths:
+     * it scans the registered resolvers.
+     *
+     * @param filePath path of a file in a shard directory
+     * @return the index name, or {@code null} if the path has no index UUID or no shard of that index is open here
+     */
+    public static String indexNameForFile(String filePath) {
+        if (filePath == null) {
+            return null;
+        }
+        String[] parts = filePath.split("[/\\\\]");
+        for (int i = parts.length - 2; i >= 0; i--) {
+            if ("indices".equals(parts[i])) {
+                KeyResolver resolver = getAnyResolverForIndexImpl(parts[i + 1]);
+                return resolver instanceof DefaultKeyResolver r ? r.getIndexName() : null;
+            }
+        }
+        return null;
+    }
+
+    private static KeyResolver getAnyResolverForIndexImpl(String indexUuid) {
         for (Map.Entry<ShardCacheKey, KeyResolver> entry : resolverCache.entrySet()) {
             if (entry.getKey().getIndexUuid().equals(indexUuid)) {
                 return entry.getValue();  // Return first match - all shards share same master key

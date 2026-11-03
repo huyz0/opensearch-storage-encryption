@@ -101,8 +101,8 @@ public class CryptoMetricsServiceTests extends OpenSearchTestCase {
         when(mockMetricsRegistry.createCounter(eq("crypto.index.error.total"), any(), any())).thenReturn(index);
         CryptoMetricsService.initialize(mockMetricsRegistry);
 
-        CryptoMetricsService.count(ErrorType.AUTH_FAILURE, "logs-1");
-        CryptoMetricsService.count(ErrorType.POOL_EXHAUSTED);
+        CryptoMetricsService.count(ErrorType.POOL_EXHAUSTED, "logs-1");
+        CryptoMetricsService.count(ErrorType.AUTH_FAILURE);
 
         verify(node, times(2)).add(eq(1.0), any(Tags.class));
         verifyNoInteractions(index);
@@ -114,9 +114,9 @@ public class CryptoMetricsServiceTests extends OpenSearchTestCase {
         expectThrows(IllegalStateException.class, CryptoMetricsService::getInstance);
     }
 
-    public void testOnlyKeyErrorsAreIndexLevel() {
+    public void testOnlyKeyAndAuthErrorsAreIndexLevel() {
         for (ErrorType type : ErrorType.values()) {
-            boolean expected = type == ErrorType.KMS_KEY_ERROR || type == ErrorType.KMS_INDEX_BLOCKED;
+            boolean expected = type == ErrorType.KMS_KEY_ERROR || type == ErrorType.KMS_INDEX_BLOCKED || type == ErrorType.AUTH_FAILURE;
             assertEquals(type.name(), expected, type.isIndexLevel());
         }
     }

@@ -427,4 +427,25 @@ public class DefaultKeyResolverTests extends OpenSearchTestCase {
         verify(mockKeyProvider, never()).decryptKey(any());
         verify(mockKeyProvider, never()).generateDataPair();
     }
+
+    public void testIndexNameForFileFindsRegisteredIndex() throws Exception {
+        byte[] dataKey = new byte[32];
+        when(mockKeyProvider.generateDataPair()).thenReturn(new DataKeyPair(dataKey, new byte[32]));
+        when(mockKeyProvider.decryptKey(any())).thenReturn(dataKey);
+        DefaultKeyResolver resolver = new DefaultKeyResolver(TEST_INDEX_UUID, "test-index", directory, provider, mockKeyProvider, 0);
+        registerResolver(TEST_INDEX_UUID, TEST_SHARD_ID, resolver);
+
+        assertEquals(
+            "test-index",
+            ShardKeyResolverRegistry.indexNameForFile("/data/nodes/0/indices/" + TEST_INDEX_UUID + "/0/index/_0.cfs")
+        );
+        assertEquals(
+            "test-index",
+            ShardKeyResolverRegistry.indexNameForFile("C:\\data\\indices\\" + TEST_INDEX_UUID + "\\0\\index\\_0.cfs")
+        );
+        assertNull(ShardKeyResolverRegistry.indexNameForFile("/data/nodes/0/indices/other-uuid/0/index/_0.cfs"));
+        assertNull(ShardKeyResolverRegistry.indexNameForFile("/tmp/_0.cfs"));
+        assertNull(ShardKeyResolverRegistry.indexNameForFile("/data/indices"));
+        assertNull(ShardKeyResolverRegistry.indexNameForFile(null));
+    }
 }

@@ -23,6 +23,7 @@ import org.opensearch.index.store.cipher.ChunkCipher;
 import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.cipher.EncryptionMetadataCache;
 import org.opensearch.index.store.key.KeyDerivation;
+import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.index.store.metrics.ErrorType;
 
@@ -186,7 +187,7 @@ public class EncryptionFooter {
 
         // Verify auth tag
         if (!verifyFooterAuthTag(fileKey, footerData, authTag)) {
-            CryptoMetricsService.count(ErrorType.AUTH_FAILURE);
+            CryptoMetricsService.count(ErrorType.AUTH_FAILURE, ShardKeyResolverRegistry.indexNameForFile(resourceDescription));
             throw new CorruptIndexException("Footer authentication failed", resourceDescription);
         }
 

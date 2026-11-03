@@ -9,8 +9,8 @@ public enum ErrorType {
     KMS_KEY_ERROR("kms_key_error", true),
     /** The key health monitor applied a write or read block to an index. Also counted per index. */
     KMS_INDEX_BLOCKED("kms_index_blocked", true),
-    /** Encrypted data or a footer failed authentication: corruption, tampering or a wrong key. */
-    AUTH_FAILURE("auth_failure"),
+    /** Encrypted data or a footer failed authentication: corruption, tampering or a wrong key. Also counted per index. */
+    AUTH_FAILURE("auth_failure", true),
     /** A block load gave up because the segment pool stayed exhausted. */
     POOL_EXHAUSTED("pool_exhausted"),
     /** A best-effort readahead task failed with an I/O error. */

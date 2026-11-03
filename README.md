@@ -297,7 +297,7 @@ The plugin reports metrics through OpenSearch's telemetry framework (enable a me
 | Metric | Type | Tags | What it shows |
 | --- | --- | --- | --- |
 | `crypto.error.total` | counter | `error_type` | Errors by type: `kms_key_error`, `kms_index_blocked`, `auth_failure`, `pool_exhausted`, `readahead_failure`, `index_input_error`, `index_output_error`, `directory_creation_error`, and segment refcount errors |
-| `crypto.index.error.total` | counter | `error_type`, `index_name` | The same count for errors that affect one index (`kms_key_error`, `kms_index_blocked`), so you can see which index |
+| `crypto.index.error.total` | counter | `error_type`, `index_name` | The same count for errors that affect one index (`kms_key_error`, `kms_index_blocked`, `auth_failure`), so you can see which index |
 | `crypto.kms.blocked_indices` | gauge | none | Indices this node's key health monitor has blocked because their master key can't be loaded |
 | `crypto.pool.segments.max`, `.allocated`, `.free` | gauge | none | Shared segment pool capacity, segments allocated, and allocated segments not in use |
 | `crypto.cache.blocks` | gauge | none | Blocks in the shared block cache |
