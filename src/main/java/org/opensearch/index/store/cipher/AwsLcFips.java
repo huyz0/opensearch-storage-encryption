@@ -19,6 +19,9 @@ import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.Key;
 import java.security.MessageDigest;
+import java.security.Provider;
+import java.security.SecureRandom;
+import java.security.SecureRandomSpi;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.Locale;
@@ -397,6 +400,53 @@ public final class AwsLcFips {
             throw e;
         } catch (Throwable t) {
             throw new IllegalStateException(t);
+        }
+    }
+
+    /**
+     * A {@link SecureRandom} drawing from the module's DRBG ({@link #randomBytes}). It is not registered with the
+     * JCE; seeding it has no effect, since the module seeds its DRBG itself.
+     */
+    public SecureRandom secureRandom() {
+        return new ModuleRandom(this);
+    }
+
+    private static final class ModuleRandom extends SecureRandom {
+        private static final Provider PROVIDER = new Provider("AWS-LC-FIPS", "3.0.0", "AWS-LC FIPS module DRBG (not registered)") {
+        };
+
+        ModuleRandom(AwsLcFips module) {
+            super(new Spi(module), PROVIDER);
+        }
+
+        @Override
+        public String getAlgorithm() {
+            return "AWS-LC-FIPS-DRBG";
+        }
+    }
+
+    private static final class Spi extends SecureRandomSpi {
+        private final transient AwsLcFips module;
+
+        Spi(AwsLcFips module) {
+            this.module = module;
+        }
+
+        @Override
+        protected void engineSetSeed(byte[] seed) {
+            // The module seeds and reseeds its DRBG from its own entropy source.
+        }
+
+        @Override
+        protected void engineNextBytes(byte[] bytes) {
+            module.randomBytes(bytes);
+        }
+
+        @Override
+        protected byte[] engineGenerateSeed(int numBytes) {
+            byte[] seed = new byte[numBytes];
+            module.randomBytes(seed);
+            return seed;
         }
     }
 
