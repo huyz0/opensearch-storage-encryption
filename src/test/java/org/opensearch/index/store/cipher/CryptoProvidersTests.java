@@ -4,8 +4,8 @@
  */
 package org.opensearch.index.store.cipher;
 
-import java.security.SecureRandom;
 import java.security.Provider;
+import java.security.SecureRandom;
 import java.util.Map;
 
 import org.opensearch.test.OpenSearchTestCase;
