@@ -31,7 +31,7 @@ import org.opensearch.test.OpenSearchTestCase;
 /**
  * Known-answer tests for the OSEF footer and a committed golden encrypted file.
  *
- * <p>{@code golden-v1.osef} and every expected value here were produced by
+ * <p>{@code golden-v3.osef} and every expected value here were produced by
  * src/test/resources/org/opensearch/index/store/golden/generate_golden_vectors.py, which
  * implements the format without any plugin code. If one of these tests fails, the on-disk
  * format has changed: files written by earlier builds will not be readable by this one.
@@ -41,34 +41,37 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
     private static final byte[] MASTER_KEY = hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
     private static final byte[] MESSAGE_ID = hex("a0a1a2a3a4a5a6a7a8a9aaabacadaeaf");
     private static final byte[] FILE_KEY = hex("7880842664260e88ad71ee04d9f889fe1d13efe0d86041d1dab05d7a02e8d786");
-    private static final String GOLDEN_FILE = "/org/opensearch/index/store/golden/golden-v2.osef";
+    private static final String GOLDEN_FILE = "/org/opensearch/index/store/golden/golden-v3.osef";
     /** Two full 8 KiB chunks and a 3616-byte tail. */
     private static final int GOLDEN_PLAINTEXT_LENGTH = 20000;
-    private static final String GOLDEN_TAG_TABLE_HEX = "c19c977e0649b1b960f095182d7a7f4f"
-        + "3d85cdaea99e3409dea561be6514e6e0"
-        + "32db71f0d0ce929ea42edbb1e849ffff";
+    /** One {@code nonce || tag} entry per chunk. */
+    private static final String GOLDEN_TAG_TABLE_HEX = "77abc86d5c37fe261ce8496620bfef2ac071cc75736748bf2c5a080d"
+        + "2442ffeede6ab0781f47fb14858194a230ac00856299dd401798d7f3"
+        + "7fc3c2c1eb9394af89bee45c22df0f122ea650c17ddb67e4faaef4e4";
 
     /**
      * Footer of the golden file, no key metadata. Big-endian fields, in order:
      * <pre>
-     * FooterAuthTag      0b405c3ffde89b56cb4a70aa0e1ff5fa  GCM tag over the rest of the footer (as AAD)
+     * FooterAuthTag      5f4478bf35b31125564aaabf113dfd55  GCM tag over the rest of the footer (as AAD)
+     * FooterNonce        139921a957eb2c01734a97b6          GCM nonce of the auth tag (random when written)
      * DataLength         0000000000004e20                  20000
      * ChunkSize          00002000                          8192
      * MessageId          a0a1a2a3a4a5a6a7a8a9aaabacadaeaf
      * KeyMetadataLength  0000                              KeyMetadata itself is empty
      * AlgorithmId        0001                              AES_256_GCM_CTR
-     * FooterLength       00000038                          56, including the auth tag
+     * FooterLength       00000044                          68, including the auth tag
      * Magic              4f534546                          "OSEF"
      * </pre>
      */
     private static final byte[] GOLDEN_FOOTER = hex(
-        "0b405c3ffde89b56cb4a70aa0e1ff5fa"
+        "5f4478bf35b31125564aaabf113dfd55"
+            + "139921a957eb2c01734a97b6"
             + "0000000000004e20"
             + "00002000"
             + "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf"
             + "0000"
             + "0001"
-            + "00000038"
+            + "00000044"
             + "4f534546"
     );
 
@@ -79,25 +82,40 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
     }
 
     public void testFooterLayoutConstants() {
-        assertEquals(56, EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
-        assertEquals(56, EncryptionMetadataTrailer.calculateFooterSize(0));
+        assertEquals(68, EncryptionMetadataTrailer.MIN_FOOTER_SIZE);
+        assertEquals(68, EncryptionMetadataTrailer.calculateFooterSize(0));
         assertArrayEquals(new byte[] { 'O', 'S', 'E', 'F' }, EncryptionMetadataTrailer.MAGIC);
     }
 
+    /** Serialize uses a fresh provider nonce each time; everything after the nonce is fixed. */
     public void testSerializeKnownAnswer() throws IOException {
-        assertArrayEquals(GOLDEN_FOOTER, goldenFooter().serialize(FILE_KEY));
+        int fixedFrom = EncryptionMetadataTrailer.FOOTER_AUTH_TAG_SIZE + EncryptionMetadataTrailer.FOOTER_NONCE_SIZE;
+        byte[] first = goldenFooter().serialize(FILE_KEY);
+        byte[] second = goldenFooter().serialize(FILE_KEY);
+        assertEquals(GOLDEN_FOOTER.length, first.length);
+        assertArrayEquals(
+            Arrays.copyOfRange(GOLDEN_FOOTER, fixedFrom, GOLDEN_FOOTER.length),
+            Arrays.copyOfRange(first, fixedFrom, first.length)
+        );
+        assertFalse(
+            "nonces must differ",
+            Arrays.equals(Arrays.copyOfRange(first, 16, fixedFrom), Arrays.copyOfRange(second, 16, fixedFrom))
+        );
+        for (byte[] footer : new byte[][] { first, second }) {
+            EncryptionFooter parsed = EncryptionFooter.deserialize(footer, FILE_KEY);
+            assertArrayEquals(MESSAGE_ID, parsed.getMessageId());
+            assertEquals(GOLDEN_PLAINTEXT_LENGTH, parsed.getDataLength());
+        }
     }
 
     public void testDeserializeKnownAnswer() throws IOException {
         EncryptionFooter footer = EncryptionFooter.deserialize(GOLDEN_FOOTER, FILE_KEY);
         assertArrayEquals(MESSAGE_ID, footer.getMessageId());
         assertEquals(GOLDEN_PLAINTEXT_LENGTH, footer.getDataLength());
-        assertEquals(3 * 16 + GOLDEN_FOOTER.length, footer.getTrailerLength());
+        assertEquals(3 * 28 + GOLDEN_FOOTER.length, footer.getTrailerLength());
         assertEquals(1, footer.getAlgorithmId());
         assertEquals(GOLDEN_FOOTER.length, footer.getFooterLength());
         assertEquals(0, footer.getKeyMetadata().length);
-        // Round trip is byte-identical.
-        assertArrayEquals(GOLDEN_FOOTER, footer.serialize(FILE_KEY));
     }
 
     public void testEveryFooterBitIsProtected() {
@@ -127,7 +145,7 @@ public class EncryptionFooterKnownAnswerTests extends OpenSearchTestCase {
 
     /**
      * Reads the committed golden file through {@link CryptoNIOFSDirectory}. This is the
-     * format check: today's reader must decrypt and authenticate a file in the v2 format.
+     * format check: today's reader must decrypt and authenticate a file in the v3 format.
      */
     public void testReadGoldenFileThroughDirectory() throws Exception {
         Path dir = createTempDir();

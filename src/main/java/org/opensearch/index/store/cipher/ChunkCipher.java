@@ -16,17 +16,18 @@ import javax.crypto.spec.GCMParameterSpec;
  * AES-256-GCM over fixed-size chunks of an encrypted index file.
  *
  * <p>The plaintext of a file is split into {@link #CHUNK_SIZE} chunks (the last one may be shorter).
- * Chunk {@code i} is sealed on its own with the file key, the 12-byte nonce
- * {@code 00000000 || i} (big-endian {@code long}) and no AAD. The ciphertext has the same length
- * as the plaintext, so a plaintext offset is also the ciphertext offset, and each chunk's 16-byte
- * tag is stored separately in the file's tag table. A reader decrypts and verifies one whole chunk
- * at a time, so any change to the ciphertext or the tags is detected before plaintext is returned.
+ * Chunk {@code i} is sealed on its own with the file key, a random 12-byte nonce that the
+ * {@linkplain CryptoProviders#sealProvider() seal provider} generates (inside the cryptographic module in
+ * FIPS mode), and the AAD {@code i} (big-endian {@code long}). The
+ * ciphertext has the same length as the plaintext, so a plaintext offset is also the ciphertext offset.
+ * Each chunk's {@link #ENTRY_LENGTH}-byte entry, {@code nonce || tag}, is stored separately in the file's
+ * tag table. A reader decrypts and verifies one whole chunk at a time, so any change to the ciphertext,
+ * the nonces or the tags is detected before plaintext is returned.
  *
- * <p>The chunk index is part of the nonce, so moving a chunk to another position fails
- * authentication. Nonces are deterministic, so a key must seal exactly one file: callers must use
- * a fresh per-file key (SP 800-108 KDF over a random message ID), never the directory key. The footer auth
- * tag uses nonce {@code FF x 8 || 00 x 4}, which no chunk nonce can equal because chunk nonces
- * start with four zero bytes.
+ * <p>The chunk index is authenticated as AAD, so moving a chunk to another position fails
+ * authentication. Nonces come from the provider's approved DRBG (FIPS 140-3 IG C.H, random IV
+ * generated inside the module), and each file has its own key (SP 800-108 KDF over a random message
+ * ID), so one key never sees anywhere near the 2^32 random-nonce limit of SP 800-38D.
  *
  * @opensearch.internal
  */
@@ -44,6 +45,12 @@ public final class ChunkCipher {
     /** GCM nonce length in bytes. */
     public static final int NONCE_LENGTH = 12;
 
+    /** Bytes per chunk in the tag table: the chunk's nonce followed by its tag. */
+    public static final int ENTRY_LENGTH = NONCE_LENGTH + TAG_LENGTH;
+
+    /** Bytes of chunk index authenticated as AAD. */
+    private static final int AAD_LENGTH = Long.BYTES;
+
     private static final String TRANSFORMATION = "AES/GCM/NoPadding";
 
     /**
@@ -54,8 +61,10 @@ public final class ChunkCipher {
      * cost far less than the decryption.
      */
     private static final class OpenScratch {
-        final Cipher cipher = newCipher();
+        final Cipher cipher = newCipher(CryptoProviders.provider());
         final byte[] sealed = new byte[CHUNK_SIZE + TAG_LENGTH];
+        final byte[] nonce = new byte[NONCE_LENGTH];
+        final byte[] aad = new byte[AAD_LENGTH];
         final byte[] plaintext = new byte[CHUNK_SIZE];
     }
 
@@ -63,29 +72,31 @@ public final class ChunkCipher {
 
     private ChunkCipher() {}
 
-    /**
-     * Returns a new AES/GCM cipher from {@link CryptoProviders#provider()}. Writers keep their own instance:
-     * SunJCE and AWS-LC refuse to encrypt twice with the same key and nonce on one instance, which is the
-     * check we want for a writer. Bouncy Castle FIPS, the FIPS-mode fallback, does not make that check.
-     */
+    /** Returns a new AES/GCM cipher for {@link #seal}, from {@link CryptoProviders#sealProvider()}. Writers keep their own instance. */
     public static Cipher newCipher() {
+        return newCipher(CryptoProviders.sealProvider());
+    }
+
+    private static Cipher newCipher(java.security.Provider provider) {
         try {
-            return Cipher.getInstance(TRANSFORMATION, CryptoProviders.provider());
+            return Cipher.getInstance(TRANSFORMATION, provider);
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("AES/GCM is not available", e);
         }
     }
 
-    /** The nonce for chunk {@code chunkIndex}: four zero bytes followed by the big-endian index. */
-    public static byte[] nonce(long chunkIndex) {
+    /** Maximum chunks per file: the writer keeps the tag table in one array. About 600 GiB of data. */
+    public static final long MAX_CHUNKS = (Integer.MAX_VALUE - 64) / ENTRY_LENGTH;
+
+    /** The AAD for chunk {@code chunkIndex}: the big-endian index. */
+    static byte[] aad(long chunkIndex, byte[] into) {
         if (chunkIndex < 0) {
             throw new IllegalArgumentException("chunkIndex must not be negative: " + chunkIndex);
         }
-        byte[] nonce = new byte[NONCE_LENGTH];
         for (int i = 0; i < Long.BYTES; i++) {
-            nonce[NONCE_LENGTH - 1 - i] = (byte) (chunkIndex >>> (8 * i));
+            into[Long.BYTES - 1 - i] = (byte) (chunkIndex >>> (8 * i));
         }
-        return nonce;
+        return into;
     }
 
     /** Number of chunks in a file with {@code dataLength} plaintext bytes. */
@@ -95,7 +106,7 @@ public final class ChunkCipher {
 
     /** Length in bytes of the tag table for a file with {@code dataLength} plaintext bytes. */
     public static long tagTableLength(long dataLength) {
-        return chunkCount(dataLength) * TAG_LENGTH;
+        return chunkCount(dataLength) * ENTRY_LENGTH;
     }
 
     /** Plaintext length of chunk {@code chunkIndex} in a file with {@code dataLength} plaintext bytes. */
@@ -108,7 +119,7 @@ public final class ChunkCipher {
     }
 
     /**
-     * Encrypts one chunk.
+     * Encrypts one chunk under a nonce that the provider generates.
      *
      * @param cipher     the writer's cipher, from {@link #newCipher()}
      * @param key        the file key
@@ -116,14 +127,39 @@ public final class ChunkCipher {
      * @param in         plaintext
      * @param inOffset   offset of the chunk in {@code in}
      * @param length     chunk length, at most {@link #CHUNK_SIZE}
-     * @param out        receives {@code length} ciphertext bytes followed by the {@link #TAG_LENGTH}-byte tag
+     * @param out        receives {@code length} ciphertext bytes followed by the chunk's
+     *                   {@link #ENTRY_LENGTH}-byte tag-table entry ({@code nonce || tag})
      */
     public static void seal(Cipher cipher, Key key, long chunkIndex, byte[] in, int inOffset, int length, byte[] out)
         throws GeneralSecurityException {
         checkLength(length);
-        cipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(TAG_LENGTH * Byte.SIZE, nonce(chunkIndex)));
+        // No IV given: the provider generates a random one (in FIPS mode inside the module, with its DRBG).
+        cipher.init(Cipher.ENCRYPT_MODE, key, CryptoProviders.nonceRandom());
+        sealInitialized(cipher, chunkIndex, in, inOffset, length, out);
+    }
+
+    /** {@link #seal} with a caller-chosen nonce, for known-answer tests only. */
+    static void sealWithNonce(Cipher cipher, Key key, long chunkIndex, byte[] nonce, byte[] in, int inOffset, int length, byte[] out)
+        throws GeneralSecurityException {
+        checkLength(length);
+        cipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(TAG_LENGTH * Byte.SIZE, nonce));
+        sealInitialized(cipher, chunkIndex, in, inOffset, length, out);
+    }
+
+    private static void sealInitialized(Cipher cipher, long chunkIndex, byte[] in, int inOffset, int length, byte[] out)
+        throws GeneralSecurityException {
+        byte[] nonce = cipher.getIV();
+        if (nonce == null || nonce.length != NONCE_LENGTH) {
+            throw new IllegalStateException("provider chose a GCM nonce of unexpected length");
+        }
+        cipher.updateAAD(aad(chunkIndex, new byte[AAD_LENGTH]));
         int written = cipher.doFinal(in, inOffset, length, out, 0);
-        assert written == length + TAG_LENGTH : written;
+        if (written != length + TAG_LENGTH) {
+            throw new IllegalStateException("provider chose a GCM tag of unexpected length");
+        }
+        // ciphertext || tag -> ciphertext || nonce || tag
+        System.arraycopy(out, length, out, length + NONCE_LENGTH, TAG_LENGTH);
+        System.arraycopy(nonce, 0, out, length, NONCE_LENGTH);
     }
 
     /**
@@ -133,25 +169,28 @@ public final class ChunkCipher {
      * @param key        the file key
      * @param chunkIndex index of the chunk in the file
      * @param ciphertext the chunk's ciphertext, from position to limit; consumed
-     * @param tag        the chunk's tag, from position to limit ({@link #TAG_LENGTH} bytes); consumed
+     * @param entry      the chunk's tag-table entry ({@code nonce || tag}), from position to limit
+     *                   ({@link #ENTRY_LENGTH} bytes); consumed
      * @param out        receives the plaintext at its position, only if authentication succeeds
-     * @throws AEADBadTagException if the ciphertext, tag or chunk position was altered
+     * @throws AEADBadTagException if the ciphertext, nonce, tag or chunk position was altered
      */
-    public static void open(Key key, long chunkIndex, ByteBuffer ciphertext, ByteBuffer tag, ByteBuffer out)
+    public static void open(Key key, long chunkIndex, ByteBuffer ciphertext, ByteBuffer entry, ByteBuffer out)
         throws GeneralSecurityException {
         int length = ciphertext.remaining();
         checkLength(length);
-        if (tag.remaining() != TAG_LENGTH) {
-            throw new IllegalArgumentException("tag must be " + TAG_LENGTH + " bytes, got " + tag.remaining());
+        if (entry.remaining() != ENTRY_LENGTH) {
+            throw new IllegalArgumentException("entry must be " + ENTRY_LENGTH + " bytes, got " + entry.remaining());
         }
         if (out.remaining() < length) {
             throw new IllegalArgumentException("out has " + out.remaining() + " bytes left, chunk needs " + length);
         }
         OpenScratch scratch = OPEN_SCRATCH.get();
         ciphertext.get(scratch.sealed, 0, length);
-        tag.get(scratch.sealed, length, TAG_LENGTH);
+        entry.get(scratch.nonce);
+        entry.get(scratch.sealed, length, TAG_LENGTH);
         Cipher cipher = scratch.cipher;
-        cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_LENGTH * Byte.SIZE, nonce(chunkIndex)));
+        cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_LENGTH * Byte.SIZE, scratch.nonce));
+        cipher.updateAAD(aad(chunkIndex, scratch.aad));
         // Keep this a single doFinal over ciphertext||tag. Besides being the fast path, splitting it
         // into update(ciphertext) + doFinal(tag) makes BC-FIPS 2.1.2's native x86_64 GCM reject
         // valid chunks for some lengths. Throws AEADBadTagException before anything reaches out.

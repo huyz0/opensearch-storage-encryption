@@ -16,9 +16,9 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 /**
  * Node-level cache of pages of encrypted files' chunk tag tables.
  *
- * <p>A buffer-pool miss needs each chunk's 16-byte tag as well as its ciphertext. Without this cache
- * every miss does a second Direct I/O read for a few tags. A page holds {@link #TAGS_PER_PAGE} tags
- * (the tags for 2 MiB of data), so neighbouring misses in the same file share one read.
+ * <p>A buffer-pool miss needs each chunk's 28-byte tag-table entry (nonce and tag) as well as its
+ * ciphertext. Without this cache every miss does a second Direct I/O read for a few entries. A page holds
+ * {@link #TAGS_PER_PAGE} entries (those for 2 MiB of data), so neighbouring misses in the same file share one read.
  *
  * <p>Entries are keyed by the file's random message ID and plaintext length, not its path, so a file
  * written again under the same name never sees the old file's tags. Pages of deleted files age out by
@@ -30,11 +30,11 @@ import com.github.benmanes.caffeine.cache.Caffeine;
  */
 public final class ChunkTagCache {
 
-    /** Tags per cached page: 4 KiB of tags, covering 2 MiB of data. */
+    /** Tag-table entries per cached page: 7 KiB of nonces and tags, covering 2 MiB of data. */
     public static final int TAGS_PER_PAGE = 256;
-    static final int PAGE_BYTES = TAGS_PER_PAGE * ChunkCipher.TAG_LENGTH;
+    static final int PAGE_BYTES = TAGS_PER_PAGE * ChunkCipher.ENTRY_LENGTH;
 
-    /** Default heap budget, including per-entry overhead: tags for up to about 16 GiB of data. */
+    /** Default heap budget, including per-entry overhead: tag-table entries for up to about 9 GiB of data. */
     public static final long DEFAULT_MAX_BYTES = 32L * 1024 * 1024;
 
     /**
@@ -78,7 +78,7 @@ public final class ChunkTagCache {
 
     /**
      * Returns the tags of {@code chunks} chunks starting at {@code firstChunk}, as one buffer of
-     * {@code chunks * TAG_LENGTH} bytes, loading missing pages with {@code reader}.
+     * {@code chunks * ENTRY_LENGTH} bytes, loading missing pages with {@code reader}.
      *
      * @param messageId the file's message ID from its footer
      * @param dataLength the file's plaintext length, which fixes the size of its tag table
@@ -90,7 +90,7 @@ public final class ChunkTagCache {
      */
     public ByteBuffer getTags(byte[] messageId, long dataLength, long firstChunk, int chunks, PageReader reader) throws IOException {
         long tableLength = ChunkCipher.tagTableLength(dataLength);
-        ByteBuffer tags = ByteBuffer.allocate(chunks * ChunkCipher.TAG_LENGTH);
+        ByteBuffer tags = ByteBuffer.allocate(chunks * ChunkCipher.ENTRY_LENGTH);
         long chunk = firstChunk;
         long end = firstChunk + chunks;
         while (chunk < end) {
@@ -98,7 +98,7 @@ public final class ChunkTagCache {
             byte[] pageBytes = getPage(key(messageId, dataLength, page), tableLength, reader);
             int from = (int) (chunk - page * TAGS_PER_PAGE);
             int n = (int) Math.min(end - chunk, TAGS_PER_PAGE - from);
-            tags.put(pageBytes, from * ChunkCipher.TAG_LENGTH, n * ChunkCipher.TAG_LENGTH);
+            tags.put(pageBytes, from * ChunkCipher.ENTRY_LENGTH, n * ChunkCipher.ENTRY_LENGTH);
             chunk += n;
         }
         return tags.flip();

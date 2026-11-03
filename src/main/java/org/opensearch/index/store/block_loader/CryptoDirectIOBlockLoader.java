@@ -188,7 +188,7 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
                         fileKey,
                         chunk,
                         ciphertext.asSlice(position, length).asByteBuffer(),
-                        tags.slice(blockIndex * ChunkCipher.TAG_LENGTH, ChunkCipher.TAG_LENGTH),
+                        tags.slice(blockIndex * ChunkCipher.ENTRY_LENGTH, ChunkCipher.ENTRY_LENGTH),
                         result[blockIndex].segment().asSlice(0, length).asByteBuffer()
                     );
             }
