@@ -306,15 +306,15 @@ public class CryptoFileChannelWrapper extends FileChannel {
             Files.deleteIfExists(tmp);
             Set<OpenOption> options = Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, StandardOpenOption.READ);
             try {
-                try (
-                    CryptoFileChannelWrapper out = new CryptoFileChannelWrapper(
-                        FileChannel.open(tmp, options.toArray(new OpenOption[0])),
-                        keyResolver,
-                        path,
-                        options,
-                        translogUUID
-                    )
-                ) {
+                FileChannel tmpChannel = FileChannel.open(tmp, options.toArray(new OpenOption[0]));
+                CryptoFileChannelWrapper wrapper;
+                try {
+                    wrapper = new CryptoFileChannelWrapper(tmpChannel, keyResolver, path, options, translogUUID);
+                } catch (IOException | RuntimeException e) {
+                    IOUtils.closeWhileHandlingException(tmpChannel);
+                    throw e;
+                }
+                try (CryptoFileChannelWrapper out = wrapper) {
                     ByteBuffer buf = ByteBuffer.allocate(64 * 1024);
                     long pos = 0;
                     int n;

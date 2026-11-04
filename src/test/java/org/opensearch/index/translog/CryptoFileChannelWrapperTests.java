@@ -253,4 +253,14 @@ public class CryptoFileChannelWrapperTests extends OpenSearchTestCase {
         assertTrue(e.getCause() instanceof IllegalStateException);
     }
 
+    public void testDecryptingStreamClosesTheFileWhenSetupFails() throws IOException {
+        Path path = createTempDir().resolve("translog-12.tlog");
+        writeTranslog(path, randomByteArrayOfLength(100));
+        KeyResolver failing = mock(KeyResolver.class);
+        when(failing.getDataKey()).thenThrow(new IllegalStateException("key unavailable"));
+        // The test framework's file system fails the test if the raw channel is left open.
+        IOException e = expectThrows(IOException.class, () -> new CryptoDecryptingInputStream(path, failing, UUID));
+        assertTrue(e.getCause() instanceof IllegalStateException);
+    }
+
 }

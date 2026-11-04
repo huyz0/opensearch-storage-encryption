@@ -49,8 +49,10 @@ import org.opensearch.index.store.key.KeyResolver;
  *
  * <p>OpenSearch addresses the file by logical (plaintext) offsets. Frame start offsets are kept in
  * memory, and rebuilt on open by scanning the frame length headers. The scan stops at the first
- * incomplete or invalid frame. A frame torn by a crash lies beyond the last checkpoint, because
- * TranslogWriter forces the channel before it writes a checkpoint, so it is never read. A channel
+ * incomplete or invalid frame. For a local translog, a frame torn by a crash lies beyond the last
+ * checkpoint, because TranslogWriter forces the channel before it writes a checkpoint, so it is never
+ * read. (With the remote translog enabled, core skips that force; the remote store is then the
+ * durable copy.) A channel
  * that finds such a frame, or whose own frame write fails part way, rejects every later write, so a
  * file never holds two different frames for one index. OpenSearch never appends to such a file;
  * recovery reads it and writes new operations to a new generation.

@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.Set;
 
+import org.apache.lucene.util.IOUtils;
 import org.opensearch.index.store.key.KeyResolver;
 
 /**
@@ -44,7 +45,13 @@ public class CryptoDecryptingInputStream extends InputStream {
         this.encryptedChannel = FileChannel.open(filePath, StandardOpenOption.READ);
 
         // Wrap with crypto channel for decrypted stream
-        this.decryptingChannel = new CryptoFileChannelWrapper(encryptedChannel, keyResolver, filePath, openOptions, translogUUID);
+        // The wrapper indexes frames and derives the file key, so it can fail; never leak the raw channel.
+        try {
+            this.decryptingChannel = new CryptoFileChannelWrapper(encryptedChannel, keyResolver, filePath, openOptions, translogUUID);
+        } catch (IOException | RuntimeException e) {
+            IOUtils.closeWhileHandlingException(encryptedChannel);
+            throw e;
+        }
 
         this.buffer = ByteBuffer.allocate(8192);
         buffer.flip();
