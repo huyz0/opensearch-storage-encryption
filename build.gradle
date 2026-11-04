@@ -125,6 +125,9 @@ testClusters.yamlRestTest {
     setting 'node.store.crypto.allow_dummy_key_provider', 'true'
     setting 'node.store.crypto.pool_size_percentage', '0.0'
     setting 'node.store.crypto.warmup_percentage', '0.0'
+    // One cached channel, so reads keep reopening files. ScriptColdReadIT relies on this to make a
+    // Painless script open a file, and it stresses channel eviction for every other test too.
+    setting 'node.store.crypto.max_file_channels', '1'
 }
 
 compileJava {

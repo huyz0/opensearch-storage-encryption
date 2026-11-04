@@ -39,6 +39,7 @@ import org.opensearch.index.store.key.ShardKeyResolverRegistry;
 import org.opensearch.index.store.metrics.CryptoMetricsService;
 import org.opensearch.index.store.metrics.ErrorType;
 import org.opensearch.index.store.pool.Pool;
+import org.opensearch.secure_sm.AccessController;
 
 /**
  * A {@link BlockLoader} implementation that loads encrypted file blocks using Direct I/O
@@ -303,8 +304,9 @@ public class CryptoDirectIOBlockLoader implements BlockLoader<RefCountedMemorySe
             return cachedFooter;
         }
 
-        // Cache miss - read from disk using a buffered channel (footer reads are small, no O_DIRECT needed)
-        try (FileChannel channel = FileChannel.open(filePath, StandardOpenOption.READ)) {
+        // Cache miss - read from disk using a buffered channel (footer reads are small, no O_DIRECT needed).
+        // Privileged for the same reason as FileChannelCache: the caller may be a script without file permissions.
+        try (FileChannel channel = AccessController.doPrivilegedChecked(() -> FileChannel.open(filePath, StandardOpenOption.READ))) {
             long fileSize = channel.size();
             if (fileSize < EncryptionMetadataTrailer.MIN_ENCRYPTED_FILE_SIZE) {
                 throw new IOException("File too small to contain footer: " + filePath);
