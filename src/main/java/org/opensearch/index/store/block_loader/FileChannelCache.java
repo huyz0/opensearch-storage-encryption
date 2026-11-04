@@ -13,12 +13,12 @@ import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.concurrent.TimeUnit;
 
+import org.opensearch.secure_sm.AccessController;
+
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
-
-import org.opensearch.secure_sm.AccessController;
 
 /**
  * Node-level cache of {@link FileChannel} instances, bounded by max open FDs
