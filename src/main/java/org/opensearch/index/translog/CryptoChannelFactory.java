@@ -22,7 +22,7 @@ import org.opensearch.index.store.key.KeyResolver;
  * encryption/decryption for translog files.
  *
  * This factory determines whether to apply encryption based on the file extension:
- * - .tlog files: Encrypted by {@link CryptoFileChannelWrapper} (offset-keyed AES-CTR, random nonce per file)
+ * - .tlog files: Encrypted by {@link CryptoFileChannelWrapper} (sealed AES-256-GCM frames, see {@link TranslogChunkManager})
  * - .ckp files: Not encrypted (checkpoint metadata)
  *
  * Updated to use unified KeyResolver (same as index files) for consistent

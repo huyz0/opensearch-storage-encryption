@@ -18,7 +18,7 @@ import java.util.Arrays;
 import java.util.Set;
 
 import javax.crypto.Cipher;
-import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 import org.opensearch.index.store.key.KeyDerivation;
@@ -26,7 +26,8 @@ import org.opensearch.index.store.key.KeyResolver;
 import org.opensearch.test.OpenSearchTestCase;
 
 /**
- * Tests for the encrypted translog file format in {@link CryptoFileChannelWrapper}.
+ * Tests for the encrypted translog file format in {@link CryptoFileChannelWrapper}. Frame behaviour
+ * (torn frames, tampering, appends) is covered by {@link TranslogFrameEncryptionTests}.
  */
 public class CryptoFileChannelWrapperTests extends OpenSearchTestCase {
 
@@ -70,141 +71,6 @@ public class CryptoFileChannelWrapperTests extends OpenSearchTestCase {
         return buf.array();
     }
 
-    public void testRoundTripAndLayout() throws IOException {
-        Path path = createTempDir().resolve("translog-1.tlog");
-        byte[] data = randomByteArrayOfLength(randomIntBetween(1, 50_000));
-        int headerSize = writeTranslog(path, data);
-
-        assertEquals(
-            "magic and nonce add a fixed prefix",
-            headerSize + CryptoFileChannelWrapper.PREFIX_LENGTH + data.length,
-            Files.size(path)
-        );
-        byte[] raw = Files.readAllBytes(path);
-        assertEquals(CryptoFileChannelWrapper.MAGIC, ByteBuffer.wrap(raw, headerSize, 4).getInt());
-        assertFalse(
-            "data must not be stored in plaintext",
-            Arrays.equals(data, Arrays.copyOfRange(raw, headerSize + CryptoFileChannelWrapper.PREFIX_LENGTH, raw.length))
-        );
-
-        try (CryptoFileChannelWrapper channel = open(path, StandardOpenOption.READ)) {
-            assertEquals("size() hides the prefix", headerSize + data.length, channel.size());
-            assertArrayEquals(data, readFully(channel, headerSize, data.length));
-            // The header itself is untouched, because core reads it through a plain FileChannel.
-        }
-        try (FileChannel plain = FileChannel.open(path, StandardOpenOption.READ)) {
-            TranslogHeader.read(UUID, path, plain);
-        }
-    }
-
-    public void testEveryFileGetsItsOwnNonce() throws IOException {
-        // Same key, translog UUID, generation and plaintext: the situation of a primary and its replica.
-        byte[] data = randomByteArrayOfLength(4096);
-        Path a = createTempDir().resolve("translog-7.tlog");
-        Path b = createTempDir().resolve("translog-7.tlog");
-        int headerSize = writeTranslog(a, data);
-        writeTranslog(b, data);
-
-        byte[] rawA = Files.readAllBytes(a);
-        byte[] rawB = Files.readAllBytes(b);
-        int dataStart = headerSize + CryptoFileChannelWrapper.PREFIX_LENGTH;
-        assertFalse(
-            Arrays.equals(Arrays.copyOfRange(rawA, headerSize + 4, dataStart), Arrays.copyOfRange(rawB, headerSize + 4, dataStart))
-        );
-        // With a shared nonce, ciphertext XOR would equal plaintext XOR (all zeros here).
-        assertFalse(Arrays.equals(Arrays.copyOfRange(rawA, dataStart, rawA.length), Arrays.copyOfRange(rawB, dataStart, rawB.length)));
-    }
-
-    public void testDataIsReadableWhileStillOpenAndAfterCrash() throws IOException {
-        Path path = createTempDir().resolve("translog-2.tlog");
-        byte[] first = randomByteArrayOfLength(randomIntBetween(1, 10_000));
-        byte[] second = randomByteArrayOfLength(randomIntBetween(1, 10_000));
-
-        FileChannel raw = FileChannel.open(path, WRITE);
-        CryptoFileChannelWrapper writer = new CryptoFileChannelWrapper(raw, keyResolver, path, Set.of(WRITE), UUID);
-        TranslogHeader header = new TranslogHeader(UUID, 1L);
-        header.write(writer, false);
-        int headerSize = header.sizeInBytes();
-        writer.write(ByteBuffer.wrap(first));
-
-        // A second reader sees everything written so far, with the writer still open.
-        try (CryptoFileChannelWrapper reader = open(path, StandardOpenOption.READ)) {
-            assertEquals(headerSize + first.length, reader.size());
-            assertArrayEquals(first, readFully(reader, headerSize, first.length));
-        }
-
-        writer.write(ByteBuffer.wrap(second));
-        // Simulate kill -9: the raw file is left as is, nothing is finalized.
-        raw.close();
-
-        try (CryptoFileChannelWrapper reader = open(path, StandardOpenOption.READ)) {
-            assertArrayEquals(first, readFully(reader, headerSize, first.length));
-            assertArrayEquals(second, readFully(reader, headerSize + first.length, second.length));
-        }
-    }
-
-    public void testRandomAccessReadsAndAppendOnlyWrites() throws IOException {
-        Path path = createTempDir().resolve("translog-3.tlog");
-        byte[] data = randomByteArrayOfLength(20_000);
-        int headerSize = writeTranslog(path, data);
-
-        try (CryptoFileChannelWrapper channel = open(path, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-            for (int i = 0; i < 50; i++) {
-                int off = randomIntBetween(0, data.length - 1);
-                int len = randomIntBetween(1, data.length - off);
-                assertArrayEquals(Arrays.copyOfRange(data, off, off + len), readFully(channel, headerSize + off, len));
-            }
-
-            // Overwriting data would reuse keystream, and writing past the end would leave a hole.
-            int off = randomIntBetween(0, data.length - 1);
-            expectThrows(IOException.class, () -> channel.write(ByteBuffer.wrap(new byte[] { 1 }), headerSize + off));
-            expectThrows(IOException.class, () -> channel.write(ByteBuffer.wrap(new byte[] { 1 }), headerSize + data.length + 1));
-            assertArrayEquals(data, readFully(channel, headerSize, data.length));
-
-            // Appending at the end works, positional or relative.
-            byte[] more = randomByteArrayOfLength(randomIntBetween(1, 100));
-            channel.write(ByteBuffer.wrap(more), headerSize + data.length);
-            channel.position(channel.size());
-            byte[] evenMore = randomByteArrayOfLength(randomIntBetween(1, 100));
-            channel.write(ByteBuffer.wrap(evenMore));
-            assertArrayEquals(more, readFully(channel, headerSize + data.length, more.length));
-            assertArrayEquals(evenMore, readFully(channel, headerSize + data.length + more.length, evenMore.length));
-        }
-    }
-
-    public void testDataMatchesWholeStreamCtr() throws Exception {
-        Path path = createTempDir().resolve("translog-4.tlog");
-        byte[] data = randomByteArrayOfLength(randomIntBetween(1, 5000));
-        int headerSize = writeTranslog(path, data);
-
-        byte[] raw = Files.readAllBytes(path);
-        byte[] nonce = Arrays.copyOfRange(raw, headerSize + 4, headerSize + CryptoFileChannelWrapper.PREFIX_LENGTH);
-        Cipher ctr = Cipher.getInstance("AES/CTR/NoPadding");
-        // The CTR key is KDF(data key, nonce, "translog-ctr"), not the data key itself. The context
-        // string is spelled out to pin the on-disk format.
-        SecretKeySpec fileKey = new SecretKeySpec(KeyDerivation.deriveAesKey(key.getEncoded(), nonce, "translog-ctr"), "AES");
-        ctr.init(Cipher.DECRYPT_MODE, fileKey, new IvParameterSpec(nonce));
-        byte[] plain = ctr.doFinal(raw, headerSize + CryptoFileChannelWrapper.PREFIX_LENGTH, data.length);
-        assertArrayEquals("data is one AES-CTR stream starting at the nonce", data, plain);
-    }
-
-    public void testCounterBlockCarriesAcrossBytes() {
-        byte[] nonce = new byte[16];
-        Arrays.fill(nonce, 12, 16, (byte) 0xFF);
-        byte[] expected = new byte[16];
-        expected[11] = 1;
-        expected[15] = 0;
-        assertArrayEquals(expected, TranslogCipher.counterBlock(nonce, 1));
-
-        byte[] allOnes = new byte[16];
-        Arrays.fill(allOnes, (byte) 0xFF);
-        assertArrayEquals("wraps around like a 128-bit counter", new byte[16], TranslogCipher.counterBlock(allOnes, 1));
-
-        byte[] zero = new byte[16];
-        byte[] big = TranslogCipher.counterBlock(zero, 0x0102030405060708L);
-        assertArrayEquals(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }, Arrays.copyOfRange(big, 8, 16));
-    }
-
     public void testReadStartingInHeaderStopsAtHeaderEnd() throws IOException {
         Path path = createTempDir().resolve("translog-5.tlog");
         byte[] data = randomByteArrayOfLength(1000);
@@ -225,48 +91,6 @@ public class CryptoFileChannelWrapperTests extends OpenSearchTestCase {
         }
     }
 
-    public void testHeaderOnlyFileHasNoData() throws IOException {
-        Path path = createTempDir().resolve("translog-6.tlog");
-        int headerSize = writeTranslog(path, new byte[0]);
-        assertEquals("no nonce until the first data byte", headerSize, Files.size(path));
-
-        try (CryptoFileChannelWrapper channel = open(path, StandardOpenOption.READ)) {
-            assertEquals(headerSize, channel.size());
-            assertEquals(-1, channel.read(ByteBuffer.allocate(16), headerSize));
-        }
-    }
-
-    public void testRejectsUnknownFormat() throws IOException {
-        Path path = createTempDir().resolve("translog-8.tlog");
-        int headerSize = writeTranslog(path, randomByteArrayOfLength(100));
-        try (FileChannel raw = FileChannel.open(path, StandardOpenOption.WRITE)) {
-            raw.write(ByteBuffer.wrap(new byte[] { 0, 0, 0, 0 }), headerSize);
-        }
-        try (CryptoFileChannelWrapper channel = open(path, StandardOpenOption.READ)) {
-            IOException e = expectThrows(IOException.class, () -> channel.read(ByteBuffer.allocate(16), headerSize));
-            assertTrue(e.getMessage(), e.getMessage().contains("Unsupported translog encryption format"));
-        }
-    }
-
-    public void testTruncatingDataIsRefused() throws IOException {
-        Path path = createTempDir().resolve("translog-9.tlog");
-        int headerSize = writeTranslog(path, randomByteArrayOfLength(100));
-        try (CryptoFileChannelWrapper channel = open(path, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-            expectThrows(IOException.class, () -> channel.truncate(headerSize + 50));
-            expectThrows(IOException.class, () -> channel.truncate(headerSize));
-            channel.truncate(headerSize + 100); // no-op at the current size
-            assertEquals(headerSize + 100, channel.size());
-        }
-
-        // A file with only its header can still be truncated.
-        Path empty = createTempDir().resolve("translog-11.tlog");
-        writeTranslog(empty, new byte[0]);
-        try (CryptoFileChannelWrapper channel = open(empty, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-            channel.truncate(0);
-            assertEquals(0, channel.size());
-        }
-    }
-
     public void testScatteringReadFillsEachBufferBeforeTheNext() throws IOException {
         Path path = createTempDir().resolve("translog-10.tlog");
         byte[] data = randomByteArrayOfLength(10_000);
@@ -282,44 +106,121 @@ public class CryptoFileChannelWrapperTests extends OpenSearchTestCase {
         }
     }
 
-    public void testDataKeyIsNotUsedDirectly() throws Exception {
-        Path path = createTempDir().resolve("translog-9.tlog");
-        byte[] data = randomByteArrayOfLength(randomIntBetween(16, 5000));
+    public void testAppendIsRejected() throws IOException {
+        Path path = createTempDir().resolve("translog-8.tlog");
+        CryptoChannelFactory factory = new CryptoChannelFactory(keyResolver, UUID);
+        expectThrows(IllegalArgumentException.class, () -> factory.open(path, StandardOpenOption.CREATE, StandardOpenOption.APPEND));
+        assertFalse(Files.exists(path));
+    }
+
+    public void testRoundTripAndLayout() throws IOException {
+        Path path = createTempDir().resolve("translog-1.tlog");
+        byte[] data = randomByteArrayOfLength(randomIntBetween(1, 50_000));
         int headerSize = writeTranslog(path, data);
 
+        long frames = (data.length + TranslogChunkManager.DEFAULT_MAX_FRAME_SIZE - 1) / TranslogChunkManager.DEFAULT_MAX_FRAME_SIZE;
+        assertEquals(
+            "format header plus a fixed overhead per frame",
+            headerSize + TranslogChunkManager.FORMAT_HEADER_SIZE + data.length + frames * TranslogChunkManager.FRAME_OVERHEAD,
+            Files.size(path)
+        );
         byte[] raw = Files.readAllBytes(path);
-        byte[] nonce = Arrays.copyOfRange(raw, headerSize + 4, headerSize + CryptoFileChannelWrapper.PREFIX_LENGTH);
-        Cipher ctr = Cipher.getInstance("AES/CTR/NoPadding");
-        ctr.init(Cipher.DECRYPT_MODE, key, new IvParameterSpec(nonce));
-        byte[] plain = ctr.doFinal(raw, headerSize + CryptoFileChannelWrapper.PREFIX_LENGTH, data.length);
-        assertFalse(Arrays.equals(data, plain));
-    }
+        ByteBuffer format = ByteBuffer.wrap(raw, headerSize, TranslogChunkManager.FORMAT_HEADER_SIZE);
+        assertEquals(TranslogChunkManager.FORMAT_MAGIC, format.getInt());
+        assertEquals(TranslogChunkManager.FORMAT_VERSION, format.getInt());
+        assertEquals(TranslogChunkManager.DEFAULT_MAX_FRAME_SIZE, format.getInt());
 
-    public void testTruncatingAwayThePrefixStartsANewNonce() throws IOException {
-        Path path = createTempDir().resolve("translog-5.tlog");
-        TranslogHeader header = new TranslogHeader(UUID, 1L);
-        int headerSize = header.sizeInBytes();
-        // A header and a prefix with no data, as left by a write that failed after the prefix.
-        try (FileChannel raw = FileChannel.open(path, WRITE)) {
-            header.write(raw, false);
-            byte[] nonce = randomByteArrayOfLength(TranslogCipher.NONCE_LENGTH);
-            raw.write(ByteBuffer.allocate(CryptoFileChannelWrapper.PREFIX_LENGTH).putInt(CryptoFileChannelWrapper.MAGIC).put(nonce).flip());
-        }
-        byte[] data = randomByteArrayOfLength(randomIntBetween(1, 1000));
-        try (CryptoFileChannelWrapper channel = open(path, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-            assertEquals(headerSize, channel.size());
-            assertEquals(-1, channel.read(ByteBuffer.allocate(1), headerSize)); // caches the cipher
-            channel.truncate(0);
-            channel.position(0);
-            header.write(channel, false);
-            channel.write(ByteBuffer.wrap(data), headerSize);
-        }
         try (CryptoFileChannelWrapper channel = open(path, StandardOpenOption.READ)) {
+            assertEquals("size() hides the format header and frame overhead", headerSize + data.length, channel.size());
             assertArrayEquals(data, readFully(channel, headerSize, data.length));
         }
+        // The header itself is untouched, because core reads it through a plain FileChannel.
+        try (FileChannel plain = FileChannel.open(path, StandardOpenOption.READ)) {
+            TranslogHeader.read(UUID, path, plain);
+        }
     }
 
-    public void testKeyFailureLeavesNoPrefix() throws IOException {
+    /**
+     * Pins the on-disk format: decrypts every frame with plain JCE AES-GCM, the file key derived
+     * from the data key and the message ID with the label spelled out, and the frame index as AAD.
+     */
+    public void testFramesDecryptWithPlainGcm() throws Exception {
+        Path path = createTempDir().resolve("translog-4.tlog");
+        byte[] data = randomByteArrayOfLength(randomIntBetween(1, 30_000));
+        int headerSize = writeTranslog(path, data);
+
+        ByteBuffer raw = ByteBuffer.wrap(Files.readAllBytes(path));
+        raw.position(headerSize + 3 * Integer.BYTES);
+        byte[] messageId = new byte[16];
+        raw.get(messageId);
+        SecretKeySpec fileKey = new SecretKeySpec(KeyDerivation.deriveAesKey(key.getEncoded(), messageId, "translog-gcm"), "AES");
+        Cipher gcm = Cipher.getInstance("AES/GCM/NoPadding");
+        ByteBuffer plain = ByteBuffer.allocate(data.length);
+        for (long index = 0; raw.hasRemaining(); index++) {
+            int length = raw.getInt();
+            // ciphertext || tag in one doFinal: BC-FIPS rejects valid frames decrypted as update + doFinal(tag).
+            byte[] sealed = new byte[length + 16];
+            byte[] nonce = new byte[12];
+            raw.get(sealed, 0, length).get(nonce).get(sealed, length, 16);
+            gcm.init(Cipher.DECRYPT_MODE, fileKey, new GCMParameterSpec(128, nonce));
+            gcm.updateAAD(ByteBuffer.allocate(Long.BYTES).putLong(index).array());
+            plain.put(gcm.doFinal(sealed));
+        }
+        assertArrayEquals(data, plain.array());
+    }
+
+    public void testDataKeyIsNotUsedDirectly() throws Exception {
+        Path path = createTempDir().resolve("translog-9.tlog");
+        int headerSize = writeTranslog(path, randomByteArrayOfLength(randomIntBetween(16, 5000)));
+        byte[] raw = Files.readAllBytes(path);
+        int frame = headerSize + TranslogChunkManager.FORMAT_HEADER_SIZE;
+        int length = ByteBuffer.wrap(raw, frame, 4).getInt();
+        int nonceAt = frame + 4 + length;
+        Cipher gcm = Cipher.getInstance("AES/GCM/NoPadding");
+        gcm.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, Arrays.copyOfRange(raw, nonceAt, nonceAt + 12)));
+        gcm.updateAAD(new byte[Long.BYTES]);
+        byte[] sealed = new byte[length + 16];
+        System.arraycopy(raw, frame + 4, sealed, 0, length);
+        System.arraycopy(raw, nonceAt + 12, sealed, length, 16);
+        expectThrows(javax.crypto.AEADBadTagException.class, () -> gcm.doFinal(sealed));
+    }
+
+    public void testEveryFileGetsItsOwnKey() throws IOException {
+        // Same key, translog UUID, generation and plaintext, as for a file recreated under the same name.
+        byte[] data = new byte[4096];
+        Path a = createTempDir().resolve("translog-7.tlog");
+        Path b = createTempDir().resolve("translog-7.tlog");
+        int headerSize = writeTranslog(a, data);
+        writeTranslog(b, data);
+
+        byte[] rawA = Files.readAllBytes(a);
+        byte[] rawB = Files.readAllBytes(b);
+        int idStart = headerSize + 3 * Integer.BYTES;
+        int dataStart = headerSize + TranslogChunkManager.FORMAT_HEADER_SIZE;
+        assertFalse(Arrays.equals(Arrays.copyOfRange(rawA, idStart, dataStart), Arrays.copyOfRange(rawB, idStart, dataStart)));
+        assertFalse(Arrays.equals(Arrays.copyOfRange(rawA, dataStart, rawA.length), Arrays.copyOfRange(rawB, dataStart, rawB.length)));
+    }
+
+    public void testRejectsOtherFormats() throws IOException {
+        Path path = createTempDir().resolve("translog-10.tlog");
+        int headerSize = writeTranslog(path, randomByteArrayOfLength(100));
+        ByteBuffer patch = randomFrom(
+            // upstream's version 1 (derived nonces, no message ID)
+            ByteBuffer.allocate(8).putInt(TranslogChunkManager.FORMAT_MAGIC).putInt(1),
+            // this fork's earlier AES-CTR format "OST3"
+            ByteBuffer.allocate(4).putInt(0x4F535433),
+            // a frame size larger than one GCM chunk
+            ByteBuffer.allocate(12).putInt(TranslogChunkManager.FORMAT_MAGIC).putInt(TranslogChunkManager.FORMAT_VERSION).putInt(1 << 20)
+        );
+        try (FileChannel raw = FileChannel.open(path, StandardOpenOption.WRITE)) {
+            raw.write(patch.flip(), headerSize);
+        }
+        CryptoChannelFactory factory = new CryptoChannelFactory(keyResolver, UUID);
+        IOException e = expectThrows(IOException.class, () -> factory.open(path, StandardOpenOption.READ));
+        assertTrue(e.getMessage(), e.getMessage().contains("Unsupported translog encryption format"));
+    }
+
+    public void testKeyFailureLeavesNoFormatHeader() throws IOException {
         Path path = createTempDir().resolve("translog-6.tlog");
         KeyResolver failing = mock(KeyResolver.class);
         when(failing.getDataKey()).thenThrow(new IllegalStateException("key unavailable"));
@@ -342,60 +243,24 @@ public class CryptoFileChannelWrapperTests extends OpenSearchTestCase {
         assertEquals(headerSize, Files.size(path));
     }
 
-    public void testRecreatedFileGetsANewNonce() throws IOException {
-        Path path = createTempDir().resolve("translog-7.tlog");
-        int headerSize = writeTranslog(path, randomByteArrayOfLength(100));
-        byte[] firstNonce = Arrays
-            .copyOfRange(Files.readAllBytes(path), headerSize + 4, headerSize + CryptoFileChannelWrapper.PREFIX_LENGTH);
-        Files.delete(path);
-
-        byte[] data = randomByteArrayOfLength(100);
-        writeTranslog(path, data);
-        byte[] secondNonce = Arrays
-            .copyOfRange(Files.readAllBytes(path), headerSize + 4, headerSize + CryptoFileChannelWrapper.PREFIX_LENGTH);
-        assertFalse(Arrays.equals(firstNonce, secondNonce));
-        try (CryptoFileChannelWrapper channel = open(path, StandardOpenOption.READ)) {
-            assertArrayEquals(data, readFully(channel, headerSize, data.length));
-        }
-    }
-
-    public void testAppendIsRejected() throws IOException {
-        Path path = createTempDir().resolve("translog-8.tlog");
-        CryptoChannelFactory factory = new CryptoChannelFactory(keyResolver, UUID);
-        expectThrows(IllegalArgumentException.class, () -> factory.open(path, StandardOpenOption.CREATE, StandardOpenOption.APPEND));
-        assertFalse(Files.exists(path));
-    }
-
-    public void testOlderVersionFilesAreRejected() throws IOException {
-        Path path = createTempDir().resolve("translog-10.tlog");
-        int headerSize = writeTranslog(path, randomByteArrayOfLength(100));
-        int oldMagic = randomFrom(0x4F535431, 0x4F535432); // "OST1" (raw data key), "OST2" (HKDF)
-        try (FileChannel raw = FileChannel.open(path, StandardOpenOption.WRITE)) {
-            raw.write(ByteBuffer.allocate(Integer.BYTES).putInt(oldMagic).flip(), headerSize);
-        }
-        try (CryptoFileChannelWrapper channel = open(path, StandardOpenOption.READ)) {
-            IOException e = expectThrows(IOException.class, () -> channel.read(ByteBuffer.allocate(16), headerSize));
-            assertTrue(e.getMessage(), e.getMessage().contains("Unsupported translog encryption format"));
-        }
-    }
-
-    public void testKeyFailureOnReadIsAnIOException() throws IOException {
+    public void testKeyFailureOnOpenIsAnIOException() throws IOException {
         Path path = createTempDir().resolve("translog-11.tlog");
-        int headerSize = writeTranslog(path, randomByteArrayOfLength(100));
+        writeTranslog(path, randomByteArrayOfLength(100));
         KeyResolver failing = mock(KeyResolver.class);
         when(failing.getDataKey()).thenThrow(new IllegalStateException("key unavailable"));
-        Set<OpenOption> options = Set.of(StandardOpenOption.READ);
-        try (
-            CryptoFileChannelWrapper channel = new CryptoFileChannelWrapper(
-                FileChannel.open(path, StandardOpenOption.READ),
-                failing,
-                path,
-                options,
-                UUID
-            )
-        ) {
-            IOException e = expectThrows(IOException.class, () -> channel.read(ByteBuffer.allocate(16), headerSize));
-            assertTrue(e.getCause() instanceof IllegalStateException);
-        }
+        CryptoChannelFactory factory = new CryptoChannelFactory(failing, UUID);
+        IOException e = expectThrows(IOException.class, () -> factory.open(path, StandardOpenOption.READ));
+        assertTrue(e.getCause() instanceof IllegalStateException);
     }
+
+    public void testDecryptingStreamClosesTheFileWhenSetupFails() throws IOException {
+        Path path = createTempDir().resolve("translog-12.tlog");
+        writeTranslog(path, randomByteArrayOfLength(100));
+        KeyResolver failing = mock(KeyResolver.class);
+        when(failing.getDataKey()).thenThrow(new IllegalStateException("key unavailable"));
+        // The test framework's file system fails the test if the raw channel is left open.
+        IOException e = expectThrows(IOException.class, () -> new CryptoDecryptingInputStream(path, failing, UUID));
+        assertTrue(e.getCause() instanceof IllegalStateException);
+    }
+
 }

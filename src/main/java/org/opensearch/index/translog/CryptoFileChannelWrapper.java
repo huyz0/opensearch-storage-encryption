@@ -28,26 +28,17 @@ import java.util.zip.CRC32;
 import org.apache.lucene.codecs.CodecUtil;
 import org.apache.lucene.util.IOUtils;
 import org.opensearch.common.SuppressForbidden;
-import org.opensearch.index.store.cipher.CryptoProviders;
 import org.opensearch.index.store.key.KeyResolver;
 
 /**
  * A FileChannel wrapper that transparently encrypts translog files.
  *
- * <p>File format:
- * <pre>
- * [TranslogHeader            - plaintext, written and read by core]
- * [magic "OST3"  (4 bytes)   - plaintext]
- * [nonce         (16 bytes)  - plaintext, random per file]
- * [data                      - AES-CTR, see {@link TranslogCipher}]
- * </pre>
+ * <p>The data after the plaintext TranslogHeader is stored as sealed AES-256-GCM frames; see
+ * {@link TranslogChunkManager} for the format. Callers see logical positions: the header at
+ * {@code [0, headerSize)} and data right after it, as if the file were plaintext. The header stays
+ * at offset 0 because core also reads it through a plain FileChannel.
  *
- * <p>Callers see logical positions: the header at {@code [0, headerSize)} and data right after
- * it, as if the file were plaintext. The magic and nonce are hidden, so a data byte at logical
- * position {@code p} lives at physical position {@code p + PREFIX_LENGTH}. The header stays at
- * offset 0 because core also reads it through a plain FileChannel.
- *
- * <p>The nonce is written just before the first data byte. A file that only has its header
+ * <p>The format header is written just before the first data byte. A file that only has its header
  * (as core creates for an empty translog) is valid and has no data.
  *
  * @opensearch.internal
@@ -55,26 +46,13 @@ import org.opensearch.index.store.key.KeyResolver;
 @SuppressForbidden(reason = "FileChannel operations required for encrypted translog implementation")
 public class CryptoFileChannelWrapper extends FileChannel {
 
-    /**
-     * "OST3": OpenSearch translog, encryption format version 3 (per-file key derived with the
-     * SP 800-108 KDF). Version 1 used the data key directly and version 2 derived it with HKDF; both
-     * are rejected as unsupported.
-     */
-    static final int MAGIC = 0x4F535433;
-
-    /** Bytes between the core header and the encrypted data: magic plus nonce. */
-    static final int PREFIX_LENGTH = Integer.BYTES + TranslogCipher.NONCE_LENGTH;
-
     private static final int TRANSFER_BUFFER_SIZE = 8192;
 
     private final FileChannel delegate;
-    private final KeyResolver keyResolver;
-    private final Path filePath;
     private final int headerSize;
+    private final TranslogChunkManager chunkManager;
     private final AtomicLong position;
     private final ReentrantReadWriteLock positionLock;
-    private final Object cipherLock = new Object();
-    private volatile TranslogCipher cipher;
     private volatile boolean closed = false;
 
     /**
@@ -89,16 +67,44 @@ public class CryptoFileChannelWrapper extends FileChannel {
      */
     public CryptoFileChannelWrapper(FileChannel delegate, KeyResolver keyResolver, Path path, Set<OpenOption> options, String translogUUID)
         throws IOException {
+        this(delegate, keyResolver, path, options, translogUUID, TranslogChunkManager.DEFAULT_MAX_FRAME_SIZE);
+    }
+
+    /**
+     * Creates a new CryptoFileChannelWrapper with a given maximum frame size for a new file.
+     *
+     * @param delegate the underlying FileChannel to wrap
+     * @param keyResolver the key resolver for encryption (unified with index files)
+     * @param path the file path (used for error messages)
+     * @param options the file open options
+     * @param translogUUID the translog UUID, used to compute the exact header size
+     * @param newFileMaxFrameSize the maximum frame size if the file is new; an existing file keeps its own
+     * @throws IOException if the existing file content cannot be indexed
+     */
+    CryptoFileChannelWrapper(
+        FileChannel delegate,
+        KeyResolver keyResolver,
+        Path path,
+        Set<OpenOption> options,
+        String translogUUID,
+        int newFileMaxFrameSize
+    )
+        throws IOException {
         if (translogUUID == null) {
             throw new IllegalArgumentException("translogUUID is required for exact header size calculation");
         }
         this.delegate = delegate;
-        this.keyResolver = Objects.requireNonNull(keyResolver, "keyResolver");
-        this.filePath = path;
+        Objects.requireNonNull(keyResolver, "keyResolver");
         // Non-translog files (.ckp) are never wrapped by CryptoChannelFactory; treat them as all data.
         this.headerSize = path.getFileName().toString().endsWith(".tlog") ? calculateTranslogHeaderSize(translogUUID) : 0;
+        this.chunkManager = new TranslogChunkManager(delegate, keyResolver, path, headerSize, newFileMaxFrameSize);
         this.position = new AtomicLong(delegate.position());
         this.positionLock = new ReentrantReadWriteLock();
+    }
+
+    /** Returns the frame manager, for tests. */
+    TranslogChunkManager getChunkManager() {
+        return chunkManager;
     }
 
     /**
@@ -164,44 +170,9 @@ public class CryptoFileChannelWrapper extends FileChannel {
         }
     }
 
-    /**
-     * Reads at a logical position without touching the channel position. A read never crosses
-     * from the header into the data, so a caller can't get ciphertext as if it were header bytes.
-     */
+    /** Reads at a logical position without touching the channel position. */
     private int readAtPosition(ByteBuffer dst, long position) throws IOException {
-        if (position < headerSize) {
-            ByteBuffer header = dst.duplicate();
-            header.limit(header.position() + (int) Math.min(header.remaining(), headerSize - position));
-            int n = delegate.read(header, position);
-            if (n > 0) {
-                dst.position(dst.position() + n);
-            }
-            return n;
-        }
-
-        TranslogCipher c = loadCipher();
-        if (c == null) {
-            return -1; // only the header exists
-        }
-
-        int start = dst.position();
-        int n = delegate.read(dst, position + PREFIX_LENGTH);
-        if (n <= 0) {
-            return -1;
-        }
-        decryptInPlace(c, dst, start, n, position - headerSize);
-        return n;
-    }
-
-    private static void decryptInPlace(TranslogCipher c, ByteBuffer buf, int start, int len, long dataOffset) throws IOException {
-        if (buf.hasArray()) {
-            c.apply(buf.array(), buf.arrayOffset() + start, len, dataOffset);
-        } else {
-            byte[] tmp = new byte[len];
-            buf.get(start, tmp);
-            c.apply(tmp, 0, len, dataOffset);
-            buf.put(start, tmp);
-        }
+        return chunkManager.read(dst, position);
     }
 
     @Override
@@ -259,52 +230,11 @@ public class CryptoFileChannelWrapper extends FileChannel {
     }
 
     /**
-     * Writes all of {@code src} at a logical position: header bytes as they are, data bytes
-     * encrypted for their offset. Never modifies the caller's bytes.
-     *
-     * <p>Data may only be appended at the current end. Overwriting data would encrypt different
-     * bytes with the same keystream, and writing past the end would leave a hole that decrypts to
-     * raw keystream. Core only ever appends to translog files.
+     * Writes all of {@code src} at a logical position: header bytes as they are, data bytes sealed
+     * as frames. Data may only be appended at the current end; core only ever appends to translog files.
      */
     private int writeAtPosition(ByteBuffer src, long position) throws IOException {
-        int total = src.remaining();
-        if (total == 0) {
-            return 0;
-        }
-
-        long pos = position;
-        if (pos + total > headerSize) {
-            long end = size();
-            if (Math.max(pos, headerSize) != Math.max(end, headerSize)) {
-                throw new IOException(
-                    "Encrypted translog data can only be appended at the end (size " + end + "), not written at " + pos + ": " + filePath
-                );
-            }
-        }
-        if (pos < headerSize) {
-            ByteBuffer header = src.duplicate();
-            header.limit(header.position() + (int) Math.min(header.remaining(), headerSize - pos));
-            int headerBytes = header.remaining();
-            writeFully(header, pos);
-            src.position(src.position() + headerBytes);
-            pos += headerBytes;
-        }
-
-        if (src.hasRemaining()) {
-            TranslogCipher c = cipherForWrite();
-            byte[] data = new byte[src.remaining()];
-            src.get(data);
-            c.apply(data, 0, data.length, pos - headerSize);
-            writeFully(ByteBuffer.wrap(data), pos + PREFIX_LENGTH);
-        }
-        return total;
-    }
-
-    private void writeFully(ByteBuffer buf, long physicalPosition) throws IOException {
-        long pos = physicalPosition;
-        while (buf.hasRemaining()) {
-            pos += delegate.write(buf, pos);
-        }
+        return chunkManager.write(src, position);
     }
 
     @Override
@@ -333,7 +263,7 @@ public class CryptoFileChannelWrapper extends FileChannel {
      *
      * <p>Remote-store translog files are uploaded decrypted, because each node has its own data
      * key, and core downloads them byte for byte into the translog directory. Such a file has the
-     * core header followed directly by plaintext operations instead of the magic and nonce. It is
+     * core header followed directly by plaintext operations instead of the format header. It is
      * rewritten in this format under this node's key to a temporary file, synced, and atomically
      * moved over the original, so a crash leaves either the plaintext or the encrypted file.
      *
@@ -376,15 +306,15 @@ public class CryptoFileChannelWrapper extends FileChannel {
             Files.deleteIfExists(tmp);
             Set<OpenOption> options = Set.of(StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, StandardOpenOption.READ);
             try {
-                try (
-                    CryptoFileChannelWrapper out = new CryptoFileChannelWrapper(
-                        FileChannel.open(tmp, options.toArray(new OpenOption[0])),
-                        keyResolver,
-                        path,
-                        options,
-                        translogUUID
-                    )
-                ) {
+                FileChannel tmpChannel = FileChannel.open(tmp, options.toArray(new OpenOption[0]));
+                CryptoFileChannelWrapper wrapper;
+                try {
+                    wrapper = new CryptoFileChannelWrapper(tmpChannel, keyResolver, path, options, translogUUID);
+                } catch (IOException | RuntimeException e) {
+                    IOUtils.closeWhileHandlingException(tmpChannel);
+                    throw e;
+                }
+                try (CryptoFileChannelWrapper out = wrapper) {
                     ByteBuffer buf = ByteBuffer.allocate(64 * 1024);
                     long pos = 0;
                     int n;
@@ -418,7 +348,7 @@ public class CryptoFileChannelWrapper extends FileChannel {
             return false;
         }
         int opSize = readInt(raw, headerSize);
-        if (opSize == MAGIC) {
+        if (opSize == TranslogChunkManager.FORMAT_MAGIC) {
             return false; // already encrypted
         }
         if (opSize < Integer.BYTES || opSize > dataLength - Integer.BYTES) {
@@ -450,76 +380,6 @@ public class CryptoFileChannelWrapper extends FileChannel {
         return buf.getInt(0);
     }
 
-    /** Returns the cipher for an existing file's data, or null if the file has no data yet. */
-    private TranslogCipher loadCipher() throws IOException {
-        TranslogCipher c = cipher;
-        if (c != null) {
-            return c;
-        }
-        synchronized (cipherLock) {
-            if (cipher == null && delegate.size() >= headerSize + PREFIX_LENGTH) {
-                ByteBuffer prefix = ByteBuffer.allocate(PREFIX_LENGTH);
-                long pos = headerSize;
-                while (prefix.hasRemaining()) {
-                    int n = delegate.read(prefix, pos);
-                    if (n < 0) {
-                        throw new IOException("Truncated encryption prefix in translog file " + filePath);
-                    }
-                    pos += n;
-                }
-                prefix.flip();
-                int magic = prefix.getInt();
-                if (magic != MAGIC) {
-                    throw new IOException(
-                        "Unsupported translog encryption format in "
-                            + filePath
-                            + ": expected magic 0x"
-                            + Integer.toHexString(MAGIC)
-                            + ", found 0x"
-                            + Integer.toHexString(magic)
-                    );
-                }
-                byte[] nonce = new byte[TranslogCipher.NONCE_LENGTH];
-                prefix.get(nonce);
-                cipher = newCipher(nonce);
-            }
-            return cipher;
-        }
-    }
-
-    /** Builds the cipher for {@code nonce}, reporting a key or derivation failure as an IOException as core expects. */
-    private TranslogCipher newCipher(byte[] nonce) throws IOException {
-        try {
-            return new TranslogCipher(keyResolver.getDataKey(), nonce);
-        } catch (RuntimeException e) {
-            throw new IOException(
-                "Failed to set up the cipher for translog file " + filePath + " (data key unavailable or key derivation failed)",
-                e
-            );
-        }
-    }
-
-    /** Returns the cipher for writing data, creating and persisting a fresh nonce for a new file. */
-    private TranslogCipher cipherForWrite() throws IOException {
-        TranslogCipher c = loadCipher();
-        if (c != null) {
-            return c;
-        }
-        synchronized (cipherLock) {
-            if (cipher == null) {
-                byte[] nonce = new byte[TranslogCipher.NONCE_LENGTH];
-                CryptoProviders.secureRandom().nextBytes(nonce);
-                // Resolve the key first so a key failure leaves no prefix behind.
-                TranslogCipher fresh = newCipher(nonce);
-                ByteBuffer prefix = ByteBuffer.allocate(PREFIX_LENGTH);
-                prefix.putInt(MAGIC).put(nonce).flip();
-                writeFully(prefix, headerSize);
-                cipher = fresh;
-            }
-            return cipher;
-        }
-    }
-
     @Override
     public long position() throws IOException {
         ensureOpen();
@@ -542,23 +402,17 @@ public class CryptoFileChannelWrapper extends FileChannel {
     }
 
     /**
-     * Returns the logical size: header plus data, without the hidden magic and nonce.
+     * Returns the logical size: header plus the data in every complete frame.
      */
     @Override
     public long size() throws IOException {
         ensureOpen();
-        long physical = delegate.size();
-        if (physical >= headerSize + PREFIX_LENGTH) {
-            return physical - PREFIX_LENGTH;
-        }
-        return Math.min(physical, headerSize);
+        return chunkManager.logicalSize();
     }
 
     /**
-     * Truncation is only supported while the file has no data. Cutting off encrypted data and
-     * writing different bytes at the same offsets would reuse keystream under the file's nonce,
-     * and replacing the nonce would leave other channels on the file with a stale one. Core never
-     * truncates translog files.
+     * Truncation is only supported as a no-op (to the current size or beyond). Core never truncates
+     * translog files.
      */
     @Override
     public FileChannel truncate(long size) throws IOException {
@@ -568,19 +422,7 @@ public class CryptoFileChannelWrapper extends FileChannel {
         }
         positionLock.writeLock().lock();
         try {
-            long current = size();
-            if (size < current) {
-                if (current > headerSize) {
-                    throw new IOException("Truncating an encrypted translog file that has data is not supported: " + filePath);
-                }
-                delegate.truncate(size);
-                if (size < headerSize + PREFIX_LENGTH) {
-                    // The prefix is gone, so the next data write must write a fresh nonce.
-                    synchronized (cipherLock) {
-                        cipher = null;
-                    }
-                }
-            }
+            chunkManager.truncate(size);
             if (position.get() > size) {
                 position.set(size);
             }

@@ -115,7 +115,7 @@ public class CryptoTranslogRecoveryTests extends OpenSearchTestCase {
             assertOps(translog, sources);
         }
 
-        // On disk: every generation with data is in the OST3 format and holds no operation source.
+        // On disk: every generation with data is in the frame format and holds no operation source.
         int headerSize = new TranslogHeader(uuid, 1L).sizeInBytes();
         try (Stream<Path> files = Files.list(dir)) {
             for (Path file : files.filter(f -> f.getFileName().toString().endsWith(".tlog")).toList()) {
@@ -123,7 +123,7 @@ public class CryptoTranslogRecoveryTests extends OpenSearchTestCase {
                 if (onDisk.length > headerSize) {
                     assertEquals(
                         file.toString(),
-                        CryptoFileChannelWrapper.MAGIC,
+                        TranslogChunkManager.FORMAT_MAGIC,
                         ByteBuffer.wrap(onDisk, headerSize, Integer.BYTES).getInt()
                     );
                     for (byte[] source : sources) {
