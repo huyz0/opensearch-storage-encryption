@@ -158,14 +158,13 @@ public class CryptoFileChannelWrapperTests extends OpenSearchTestCase {
         ByteBuffer plain = ByteBuffer.allocate(data.length);
         for (long index = 0; raw.hasRemaining(); index++) {
             int length = raw.getInt();
-            byte[] ciphertext = new byte[length];
+            // ciphertext || tag in one doFinal: BC-FIPS rejects valid frames decrypted as update + doFinal(tag).
+            byte[] sealed = new byte[length + 16];
             byte[] nonce = new byte[12];
-            byte[] tag = new byte[16];
-            raw.get(ciphertext).get(nonce).get(tag);
+            raw.get(sealed, 0, length).get(nonce).get(sealed, length, 16);
             gcm.init(Cipher.DECRYPT_MODE, fileKey, new GCMParameterSpec(128, nonce));
             gcm.updateAAD(ByteBuffer.allocate(Long.BYTES).putLong(index).array());
-            gcm.update(ciphertext);
-            plain.put(gcm.doFinal(tag));
+            plain.put(gcm.doFinal(sealed));
         }
         assertArrayEquals(data, plain.array());
     }
@@ -180,8 +179,10 @@ public class CryptoFileChannelWrapperTests extends OpenSearchTestCase {
         Cipher gcm = Cipher.getInstance("AES/GCM/NoPadding");
         gcm.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(128, Arrays.copyOfRange(raw, nonceAt, nonceAt + 12)));
         gcm.updateAAD(new byte[Long.BYTES]);
-        gcm.update(raw, frame + 4, length);
-        expectThrows(javax.crypto.AEADBadTagException.class, () -> gcm.doFinal(raw, nonceAt + 12, 16));
+        byte[] sealed = new byte[length + 16];
+        System.arraycopy(raw, frame + 4, sealed, 0, length);
+        System.arraycopy(raw, nonceAt + 12, sealed, length, 16);
+        expectThrows(javax.crypto.AEADBadTagException.class, () -> gcm.doFinal(sealed));
     }
 
     public void testEveryFileGetsItsOwnKey() throws IOException {
